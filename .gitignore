@@ -1,5 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
 venv/
 .env
-.lancedb/
-__pycache__/
+
+# Project Data
+data/temp_media/*
+data/lancedb/
+*.db
+
+# Obsidian Bridge (на всякий случай, если будут ссылки)
+/mnt/c/
+
+# Logs
 *.log
+monitoring/

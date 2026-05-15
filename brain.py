@@ -112,6 +112,10 @@ tags: {clean_tags}
 - [[Центральный_MOC]]
 - [[{now.split()[0]}]]
 """
+            # Если модель забыла поставить тег, принудительно лепим маркер для сортировщика
+            if "#" not in content:
+                content += "\n\n#status/new"
+            
             # Атомарная запись
             atomic_write(os.path.join(NOTES_PATH, f"{title_clean}.md"), content)
             
@@ -144,7 +148,12 @@ tags: {clean_tags}
             res = client.generate(model=MODEL, prompt=prompt)
             new_block = f"\n\n### Дополнение ({now})\n{res['response'].strip()}"
             
-            atomic_write(path, old_text + new_block)
+            # Если модель забыла поставить тег, принудительно лепим маркер для сортировщика
+            combined_text = old_text + new_block
+            if "#" not in combined_text:
+                combined_text += "\n\n#status/new"
+            
+            atomic_write(path, combined_text)
             return f"✅ Информация добавлена в заметку [[{title}]]."
         except Exception as e:
             agent_logger.error("Brain", f"Ошибка APPEND: {e}")
