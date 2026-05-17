@@ -5,6 +5,10 @@ from pathlib import Path
 # Корень проекта (Linux)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Папка для данных (векторы, временные файлы и т.д.)
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # Временная папка для загрузки аудио и картинок из Telegram
 TEMP_MEDIA_DIR = BASE_DIR / "data" / "temp_media"
 TEMP_MEDIA_DIR.mkdir(parents=True, exist_ok=True)

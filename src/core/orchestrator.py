@@ -10,8 +10,8 @@ from src.agents.clerk_agent import clerk
 from src.interfaces.telegram.bot import bot 
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
-# Импортируем телеметрию
-from src.infrastructure.telemetry import telemetry
+# Импортируем семантическую память
+from src.cognitive.memory.semantic import memory
 
 class Orchestrator:
     def __init__(self):
@@ -26,23 +26,46 @@ class Orchestrator:
         await task_manager.put(task_name, self._process_text(event))
 
     async def _process_text(self, event: TextReceivedEvent):
-        """Маршрутизация: определяет намерение (Схема, Сортировка, Заметка)."""
-        print(f"[Orchestrator] 📝 Анализ намерений от {event.user_id}...")
+        """Пайплайн: Поиск в памяти -> Формирование промпта -> LLM -> Сохранение."""
+        print(f"[Orchestrator] 📝 Запуск текстового пайплайна от {event.user_id}")
+        await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-        text_lower = event.text.lower()
+        # 1. RAG: Поиск релевантного контекста в базе
+        found_context = await memory.search_relevant_context(event.text, top_k=3)
+        
+        context_prompt = ""
+        if found_context:
+            context_prompt = f"\n\nИСТОРИЧЕСКИЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ:\n{found_context}\nИспользуй эти данные, если они помогают ответить на запрос."
 
-        # 1. Проверка на вызов Clerk Agent
-        if bool(re.search(r'(сортируй|разбери|уберись|clerk|сортировка)', text_lower)):
-            await self._run_clerk(event)
-            return
+        sys_prompt = (
+            "Ты — аналитик базы знаний. Твоя задача — превратить поток мыслей пользователя в структурированную заметку "
+            "или ответить на его вопрос, опираясь на исторический контекст (если он предоставлен).\n"
+            "ПРАВИЛО 1: Обязательно оборачивай ключевые имена и технологии в двойные квадратные скобки: [[Имя]], [[Технология]].\n"
+            "ПРАВИЛО 2: Заметка ДОЛЖНА БЫТЬ НАПИСАНА СТРОГО НА РУССКОМ ЯЗЫКЕ.\n"
+            "Отвечай в формате Markdown."
+            + context_prompt
+        )
 
-        # 2. Проверка на создание Canvas
-        if bool(re.search(r'(схем|карт|структур|canvas|майнд.мап|алгоритм)', text_lower)):
-            await self._generate_canvas(event)
-            return
+        async with telemetry.track(f"Text_Pipeline_{event.user_id}"):
+            async with vram_manager.inference_lock:
+                await vram_manager.request_model("hermes3:8b")
+                try:
+                    # Передаем запрос пользователя и найденный контекст в LLM
+                    response_text = await llm.generate_text(
+                        prompt=event.text,
+                        system_prompt=sys_prompt,
+                        model_name="hermes3:8b"
+                    )
+                except Exception as e:
+                    print(f"[Orchestrator] ❌ Ошибка LLM: {repr(e)}")
+                    await bot.send_message(chat_id=event.user_id, text="❌ Ошибка генерации текста.")
+                    return
+                finally:
+                    # Не выгружаем Hermes сразу, если ожидается диалог, либо выгружаем по стратегии
+                    pass 
 
-        # 3. По умолчанию - создание обычной заметки
-        await self._generate_note(event)
+        # ... (здесь остается твой код отправки сообщения в Telegram и сохранения файла через ObsidianWriter) ...
+        await bot.send_message(chat_id=event.user_id, text=response_text, parse_mode="Markdown")
 
     async def _run_clerk(self, event: TextReceivedEvent):
         """Запускает сортировщика с замером телеметрии."""

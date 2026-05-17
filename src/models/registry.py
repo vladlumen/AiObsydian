@@ -44,5 +44,12 @@ MODEL_REGISTRY: Dict[str, ModelProfile] = {
         backend="ollama",
         vram_required_mb=6000,
         load_strategy="on_demand"
+    ),
+    "nomic-embed-text": ModelProfile(
+        name="nomic-embed-text",
+        type="llm",  # или, возможно, "embedding", но в текущих типах только llm, stt, vision. Поскольку это эмбеддинговая модель, но в реестре используется для распределения VRAM, тип можно указать как "llm" или, если есть другой тип, но в данном случае только эти три. Оставим как "llm".
+        backend="ollama",
+        vram_required_mb=300,
+        load_strategy="on_demand"
     )
 }

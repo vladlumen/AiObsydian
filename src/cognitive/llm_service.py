@@ -73,4 +73,19 @@ class LLMService:
             response.raise_for_status()
             return response.json().get("response", "").strip()
 
+    async def get_embedding(self, text: str, model_name: str = "nomic-embed-text") -> list[float]:
+        """Получает векторное представление (эмбеддинг) текста от Ollama."""
+        # Для nomic-embed-text рекомендуется добавлять префикс для документов и запросов,
+        # но пока для простоты шлем как есть.
+        payload = {
+            "model": model_name,
+            "prompt": text
+        }
+        
+        # Эмбеддинги считаются быстро, таймаут можно сделать небольшим
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{self.base_url}/api/embeddings", json=payload, timeout=30.0)
+            response.raise_for_status()
+            return response.json().get("embedding", [])
+
 llm = LLMService()
