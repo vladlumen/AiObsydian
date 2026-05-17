@@ -13,9 +13,11 @@ class ObsidianWriter:
         self.inbox_path.mkdir(parents=True, exist_ok=True)
 
     def _sanitize_filename(self, filename: str) -> str:
-        """Очистка имени файла от запрещенных символов."""
-        # Удаляем спецсимволы и убираем квадратные скобки, если LLM их туда запихнет
-        clean = re.sub(r'[\\/*?:"<>|\[\]]', "", filename).strip()
+        """Очистка имени файла от запрещенных символов и ограничение длины."""
+        # Удаляем спецсимволы и переносы строк (\n, \r)
+        clean = re.sub(r'[\\/*?:"<>|\[\]\n\r]', "", filename).strip()
+        # Жестко ограничиваем длину имени файла (60 символов)
+        clean = clean[:60].strip()
         return clean if clean else f"Idea_{datetime.now().strftime('%Y%m%d_%H%M')}"
 
     def create_note(self, title: str, content: str, custom_properties: str = "") -> Path:

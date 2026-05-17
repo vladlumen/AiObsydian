@@ -1,7 +1,7 @@
 from pathlib import Path
 from aiogram import Router, F, Bot
 from aiogram.types import Message
-from src.infrastructure.event_bus import bus, TextReceivedEvent, VoiceReceivedEvent
+from src.infrastructure.event_bus import bus, TextReceivedEvent, VoiceReceivedEvent, PhotoReceivedEvent
 from src.core.config import TEMP_MEDIA_DIR
 
 router = Router()
@@ -10,8 +10,11 @@ router = Router()
 async def handle_text(message: Message):
     """Ловим обычный текст."""
     # Отправляем быстрое подтверждение, чтобы ты видел, что бот жив
-    await message.react(reaction=[{"type": "emoji", "emoji": "👀"}])
-    
+    try:
+        await message.react(reaction=[{"type": "emoji", "emoji": "👀"}])
+    except Exception as e:
+        print(f"[Telegram] ⚠️ Не удалось поставить реакцию: {e}")
+     
     # Создаем событие и бросаем в шину
     event = TextReceivedEvent(
         user_id=message.from_user.id,
@@ -22,7 +25,12 @@ async def handle_text(message: Message):
 @router.message(F.voice)
 async def handle_voice(message: Message, bot: Bot):
     """Ловим голосовые сообщения и скачиваем их."""
-    await message.react(reaction=[{"type": "emoji", "emoji": "🎧"}])
+    
+    # Пытаемся поставить разрешенную реакцию (например, молнию или ручку)
+    try:
+        await message.react(reaction=[{"type": "emoji", "emoji": "⚡"}])
+    except Exception as e:
+        print(f"[Telegram] ⚠️ Не удалось поставить реакцию: {e}")
     
     # Формируем путь для сохранения файла
     file_id = message.voice.file_id
@@ -37,5 +45,30 @@ async def handle_voice(message: Message, bot: Bot):
     event = VoiceReceivedEvent(
         user_id=message.from_user.id,
         audio_path=file_path
+    )
+    await bus.publish(event)
+
+
+@router.message(F.photo)
+async def handle_photo(message: Message, bot: Bot):
+    """Ловим фотографии и скачиваем их."""
+    try:
+        await message.react(reaction=[{"type": "emoji", "emoji": "👀"}])
+    except Exception as e:
+        print(f"[Telegram] ⚠️ Не удалось поставить реакцию: {e}")
+    
+    # Telegram отправляет массив разных размеров фото. Брем последнее (самое большое)
+    photo = message.photo[-1]
+    file_id = photo.file_id
+    file_name = f"photo_{message.message_id}.jpg"
+    file_path = TEMP_MEDIA_DIR / file_name
+    
+    await bot.download(file_id, destination=file_path)
+    print(f"[Telegram] 📥 Сохранил фото: {file_name}")
+    
+    event = PhotoReceivedEvent(
+        user_id=message.from_user.id,
+        photo_path=file_path,
+        caption=message.caption or ""
     )
     await bus.publish(event)

@@ -30,5 +30,19 @@ MODEL_REGISTRY: Dict[str, ModelProfile] = {
         backend="ollama",
         vram_required_mb=7000,
         load_strategy="on_demand"
+    ),
+    "llava": ModelProfile(
+        name="llava",
+        type="vision",
+        backend="ollama",
+        vram_required_mb=5500,
+        load_strategy="on_demand"
+    ),
+    "llama3.2-vision": ModelProfile(
+        name="llama3.2-vision",
+        type="vision",
+        backend="ollama",
+        vram_required_mb=6000,
+        load_strategy="on_demand"
     )
 }

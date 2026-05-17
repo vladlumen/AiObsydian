@@ -24,6 +24,12 @@ class SystemErrorEvent:
     component: str
     error_msg: str
 
+@dataclass
+class PhotoReceivedEvent:
+    user_id: int
+    photo_path: Path
+    caption: str = ""
+
 # --- Сама Шина Событий (Pub/Sub) ---
 
 class EventBus:
