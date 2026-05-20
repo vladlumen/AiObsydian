@@ -1,77 +1,75 @@
-import re
+import os
 import shutil
 from pathlib import Path
-from src.core.config import VAULT_DIR, INBOX_PATH
-from src.cognitive.llm_service import llm
+from src.core.config import INBOX_PATH, VAULT_DIR
 from src.infrastructure.vram_scheduler import vram_manager
+from src.cognitive.llm_service import llm
 
 class ClerkAgent:
     def __init__(self):
-        self.inbox = INBOX_PATH
-        self.vault = VAULT_DIR
-        # Жестко заданные директории для сортировки
-        self.categories = ["Work", "Sport", "Home", "Games", "Diary", "Tasks", "Archive"]
+        self.categories = ["work", "sport", "trips", "task", "diary"]
 
     async def run_sorting(self) -> str:
-        """Сканирует Инбокс и раскидывает файлы по папкам с помощью LLM."""
-        files = list(self.inbox.glob("*.md")) + list(self.inbox.glob("*.canvas"))
-        
+        """Сканирует Inbox и физически раскидывает файлы по папкам."""
+        files = list(INBOX_PATH.glob("*.md"))
         if not files:
-            return "📭 В `00_Inbox` нет файлов для сортировки."
+            return "📭 Папка `00_Inbox` пуста. Сортировать нечего."
 
-        results = ["🧹 **Отчет о сортировке:**\n"]
+        report = ["🧹 **Отчет сортировки:**"]
+        moved_count = 0
 
-        # Захватываем видеокарту один раз для всей пачки файлов
+        # Блокируем VRAM один раз для всей партии файлов, чтобы не дергать модель туда-сюда
         async with vram_manager.inference_lock:
             await vram_manager.request_model("hermes3:8b")
             
             for file_path in files:
                 try:
-                    content = file_path.read_text(encoding="utf-8")
+                    content = file_path.read_text(encoding='utf-8')
                     
-                    # Промпт для классификации
-                    sys_prompt = (
-                        "Ты — автоматический сортировщик файлов. "
-                        f"Выбери ОДНУ наиболее подходящую категорию из списка: {', '.join(self.categories)}. "
-                        "Верни СТРОГО одно слово (название категории), без точек и пояснений."
-                    )
+                    # Защита от переполнения контекста: берем только первые 1500 символов для анализа темы
+                    snippet = content[:1500] 
                     
-                    # Читаем только первую 1000 символов для экономии времени и токенов
-                    text_to_analyze = content[:1000]
+                    prompt = f"""
+                    Проанализируй текст заметки и выбери ТОЛЬКО ОДНО действие:
+                    1. Распредели в базовые категории: {self.categories} (верни только имя).
+                    2. Если базовые не подходят, ОБЯЗАТЕЛЬНО создай новую категорию (верни: NEW: имя_папки_на_английском_без_пробелов).
                     
-                    print(f"[Clerk] 🤔 Анализирую: {file_path.name}")
-                    raw_category = await llm.generate_text(text_to_analyze, system_prompt=sys_prompt)
-                    category = raw_category.strip()
+                    ЗАПРЕЩЕНО возвращать INBOX, кроме случаев, когда текст — это полностью нечитаемый мусор.
+                    Ответ — строго одно слово.
+                    Текст: {snippet}
+                    """
                     
-                    # Защита от галлюцинаций LLM
-                    if category not in self.categories:
-                        print(f"[Clerk] ⚠️ LLM выдала дичь ('{category}'), отправляю в Archive.")
-                        category = "Archive"
+                    result = await llm.generate_text(prompt, system_prompt="Ты - сортировщик файлов. Отвечай только одним словом.")
+                    result = result.strip().lower()
+
+                    # Определение целевой директории
+                    target_dir_name = "00_Inbox"
+                    if result in self.categories:
+                        target_dir_name = result
+                    elif result.startswith("new:"):
+                        target_dir_name = result.replace("new:", "").strip()
+
+                    if target_dir_name == "00_Inbox" or target_dir_name == "inbox":
+                        report.append(f"⏩ Пропущен: `{file_path.name}` (Неясно)")
+                        continue
 
                     # Создаем папку, если ее нет
-                    target_dir = self.vault / category
-                    target_dir.mkdir(exist_ok=True)
-                    new_path = target_dir / file_path.name
+                    target_dir_path = VAULT_DIR / target_dir_name
+                    target_dir_path.mkdir(parents=True, exist_ok=True)
 
-                    # Если это Markdown - обновляем YAML перед переносом
-                    if file_path.suffix == ".md":
-                        # Меняем type: inbox на type: category
-                        content = re.sub(r'type:\s*inbox', f'type: {category.lower()}', content, flags=re.IGNORECASE)
-                        # Удаляем тег status/new
-                        content = re.sub(r'\s*-\s*status/new\n', '\n', content, flags=re.IGNORECASE)
-                        
-                        new_path.write_text(content, encoding="utf-8")
-                        file_path.unlink() # Удаляем оригинал из инбокса
-                    else:
-                        # Если это .canvas - просто перемещаем
-                        shutil.move(str(file_path), str(new_path))
-
-                    results.append(f"✅ `{file_path.name}` ➡️ 📂 **{category}**")
+                    # Физическое перемещение файла
+                    target_file_path = target_dir_path / file_path.name
+                    shutil.move(str(file_path), str(target_file_path))
                     
-                except Exception as e:
-                    print(f"[Clerk] ❌ Ошибка с файлом {file_path.name}: {e}")
-                    results.append(f"❌ `{file_path.name}` — Ошибка")
+                    report.append(f"✅ `{file_path.name}` ➡️ `/{target_dir_name}`")
+                    moved_count += 1
 
-        return "\n".join(results)
+                except Exception as e:
+                    report.append(f"❌ Ошибка с `{file_path.name}`: {repr(e)}")
+                    
+            # Модель Hermes выгрузится автоматически блоком finally в Оркестраторе или останется до тайм-аута
+
+        report.append(f"\n**Итого перемещено:** {moved_count} файлов.")
+        return "\n".join(report)
 
 clerk = ClerkAgent()
