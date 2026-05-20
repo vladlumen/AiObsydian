@@ -1,7 +1,8 @@
 from pathlib import Path
+import os
 from aiogram import Router, F, Bot
 from aiogram.types import Message
-from src.infrastructure.event_bus import bus, TextReceivedEvent, VoiceReceivedEvent, PhotoReceivedEvent
+from src.infrastructure.event_bus import bus, TextReceivedEvent, VoiceReceivedEvent, PhotoReceivedEvent, DocumentReceivedEvent
 from src.core.config import TEMP_MEDIA_DIR
 
 router = Router()
@@ -70,5 +71,33 @@ async def handle_photo(message: Message, bot: Bot):
         user_id=message.from_user.id,
         photo_path=file_path,
         caption=message.caption or ""
+    )
+    await bus.publish(event)
+
+@router.message(F.document)
+async def handle_document(message: Message, bot: Bot):
+    """Ловим PDF и DOCX файлы."""
+    file_id = message.document.file_id
+    file_name = message.document.file_name
+    ext = os.path.splitext(file_name)[1].lower()
+
+    if ext not in ['.pdf', '.docx']:
+        await message.reply("❌ Поддерживаются только форматы PDF и DOCX.")
+        return
+
+    if message.document.file_size > 15 * 1024 * 1024:
+        await message.reply("❌ Файл слишком большой. Лимит 15 МБ.")
+        return
+
+    file_path = TEMP_MEDIA_DIR / file_name
+    await bot.download(file_id, destination=file_path)
+    print(f"[Telegram] 📥 Сохранил документ: {file_name}")
+
+    caption = message.caption or ""
+    event = DocumentReceivedEvent(
+        user_id=message.from_user.id,
+        file_path=file_path,
+        file_name=file_name,
+        caption=caption
     )
     await bus.publish(event)

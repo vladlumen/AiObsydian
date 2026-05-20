@@ -30,6 +30,13 @@ class PhotoReceivedEvent:
     photo_path: Path
     caption: str = ""
 
+@dataclass
+class DocumentReceivedEvent:
+    user_id: int
+    file_path: Path
+    file_name: str
+    caption: str = ""
+
 # --- Сама Шина Событий (Pub/Sub) ---
 
 class EventBus:
