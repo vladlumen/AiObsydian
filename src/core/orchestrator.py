@@ -4,16 +4,15 @@ import json
 from src.infrastructure.event_bus import bus, VoiceReceivedEvent, TextReceivedEvent, PhotoReceivedEvent, DocumentReceivedEvent
 from src.infrastructure.task_queue import task_manager
 from src.infrastructure.vram_scheduler import vram_manager
-from src.infrastructure.telemetry import telemetry  # Добавили явный импорт телеметрии
+from src.infrastructure.telemetry import telemetry
 from src.agents.obsidian_writer import writer
 from src.agents.clerk_agent import clerk
-from src.agents.parsers.url_parser import url_parser
-from src.agents.parsers.document_parser import document_parser
-# Импортируем инстанс бота, чтобы отправлять сообщения
+from src.parsers.url_parser import url_parser
+from src.parsers.pdf_parser import pdf_parser
+from src.parsers.docx_parser import docx_parser
 from src.interfaces.telegram.bot import bot 
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
-# Импортируем семантическую память
 from src.cognitive.memory.semantic import memory
 
 URL_REGEX = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)+')
@@ -29,10 +28,8 @@ class Orchestrator:
     async def handle_text_event(self, event: TextReceivedEvent):
         """Роутер текста: Поиск, Схемы, Сортировка, Ссылки или Инжест заметки."""
         text_lower = event.text.lower().strip()
-        
         urls = URL_REGEX.findall(event.text)
         
-        # Если текст начинается или заканчивается знаком вопроса — это поиск
         if text_lower.startswith("?") or text_lower.endswith("?"):
             if text_lower.startswith("?"):
                 event.text = event.text[1:].strip()
@@ -56,19 +53,16 @@ class Orchestrator:
         print(f"[Orchestrator] 🔍 Запуск поиска по базе для {event.user_id}")
         await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-        # Вытаскиваем топ-5 кусков контекста
         found_context = await memory.search_relevant_context(event.text, top_k=5)
-        
-        # Строка для дебага — в консоли будет видно, что именно нашла база
         print(f"\n[DEBUG RAG] База нашла следующий контекст:\n{found_context}\n")
         
         if not found_context:
             await bot.send_message(chat_id=event.user_id, text="В локальном архиве ничего не найдено по этому запросу.")
             return
 
-        # Настройка красивого и структурированного Markdown-вывода
         sys_prompt = (
-            "Ты — аналитик локальной базы знаний. Твоя задача — дать точный, структурированный и визуально аккуратный ответ на вопрос пользователя.\n\n"
+            "Ты — аналитик локальной базы знаний. Твоя задача — дать точный, структурированный и визуально аккуратный ответ на вопрос пользователя.\n"
+            "ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. Игнорируй английский язык в метаданных контекста, сам ответ должен быть полностью на русском.\n\n"
             "ПРАВИЛА АНАЛИЗА КОНТЕКСТА:\n"
             "1. Используй ИСКЛЮЧИТЕЛЬНО предоставленные факты из блока <CONTEXT>.\n"
             "2. Если информация в разных фрагментах различается или противоречит друг другу (разные даты, статусы, результаты) — НЕ игнорируй это. Обязательно перечисли все найденные версии фактов.\n"
@@ -78,7 +72,7 @@ class Orchestrator:
             "6. Шаблонный отказ 'В базе нет информации' разрешен ТОЛЬКО в том случае, если в контексте вообще нет ни одного упоминания сущностей из запроса.\n\n"
             "ТРЕБОВАНИЯ К ФОРМАТИРОВАНИЮ ОТВЕТА:\n"
             "- Используй списки (буллиты) и жирный шрифт для ключевых показателей (время, скорость, даты, имена, результаты).\n"
-            "- Разделяй логические блоки пустой строкой, избегай плотных стен сплошного текста.\n"
+            "- Разделяй логические blocks пустой строкой, избегай плотных стен сплошного текста.\n"
             "- Добавляй релевантные эмодзи в начале строк для улучшения читаемости (например, 🏃‍♂️ для спорта, 📅 для дат, 📊 для цифр/статистики).\n"
             "- В самом конце ответа обязательно укажи заголовок файла-источника в формате: `📂 Источник: [[Название_файла]]`.\n\n"
             f"<CONTEXT>\n{found_context}\n</CONTEXT>"
@@ -87,14 +81,9 @@ class Orchestrator:
         response_text = ""
         async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
             async with vram_manager.inference_lock:
-                # На твоей RTX 3090 gemma2:27b отработает этот промпт идеально. 
-                # Если переключаешься на неё, просто замени строку ниже на "gemma2:27b"
                 await vram_manager.request_model("hermes3:8b")
                 try:
-                    response_text = await llm.generate_text(
-                        event.text,
-                        system_prompt=sys_prompt
-                    )
+                    response_text = await llm.generate_text(event.text, system_prompt=sys_prompt)
                 except Exception as e:
                     print(f"[Orchestrator] ❌ Ошибка LLM: {repr(e)}")
                     response_text = "❌ Ошибка генерации ответа."
@@ -122,7 +111,7 @@ class Orchestrator:
                 "ПРАВИЛО: ЗАПРЕЩЕНО использовать факты из <OLD_CONTEXT> в заголовке (TITLE), резюме, деталях и сущностях. Используй <OLD_CONTEXT> ИСКЛЮЧИТЕЛЬНО для раздела 'Связи'.\n\n"
                 "Формат:\n"
                 "PROPERTIES: тег1, тег2\n"
-                "TITLE: Заголовок в формате 'ГГГГ-ММ-ДД Краткая Суть' (например, '2026-05-21 Результаты пробежки') на основе <NEW_DATA>\n"
+                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй ТЕКУЩУЮ дату (2026-05-21) или дату публикации статьи, а вместо 'Краткая Суть' напиши реальную главную тему статьи (например, '2026-05-21 Разработка игр в Roblox') на основе <NEW_DATA>\n"
                 "CONTENT:\n"
                 "> [!abstract] Резюме\n"
                 "(суть из <NEW_DATA>)\n\n"
@@ -134,11 +123,18 @@ class Orchestrator:
                 "- (связи с <OLD_CONTEXT>, иначе 'Нет данных')"
             )
 
+            raw_response = ""
             async with telemetry.track("LLM_Inference_and_Load"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model("hermes3:8b")
-                    safe_prompt = f"<NEW_DATA>\n{event.text}\n</NEW_DATA>"
-                    raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
+                    try:
+                        safe_prompt = f"<NEW_DATA>\n{event.text}\n</NEW_DATA>"
+                        raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
+                    except Exception as e:
+                        print(f"[Orchestrator] ❌ Ошибка генерации заметки: {e}")
+                        return
+                    finally:
+                        await vram_manager.unload_model("hermes3:8b")
 
             title = "Новая идея"
             properties = ""
@@ -197,9 +193,13 @@ class Orchestrator:
             "}"
         )
 
+        raw_response = ""
         async with vram_manager.inference_lock:
             await vram_manager.request_model("hermes3:8b")
-            raw_response = await llm.generate_text(event.text, system_prompt=sys_prompt)
+            try:
+                raw_response = await llm.generate_text(event.text, system_prompt=sys_prompt)
+            finally:
+                await vram_manager.unload_model("hermes3:8b")
 
         clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_response.strip(), flags=re.MULTILINE)
 
@@ -214,7 +214,6 @@ class Orchestrator:
             await bot.send_message(chat_id=event.user_id, text="❌ Ошибка: LLM выдала неверный формат структуры.")
         except Exception as e:
             await bot.send_message(chat_id=event.user_id, text=f"❌ Ошибка записи Canvas: {e}")
-
 
     async def _generate_web_note(self, user_id: int, user_comment: str, url: str, extracted_text: str):
         """Специализированный пайплайн для экстракции фактов из статей."""
@@ -235,26 +234,29 @@ class Orchestrator:
             sys_prompt += (
                 "Формат:\n"
                 "PROPERTIES: article, web_clip\n"
-                "TITLE: Заголовок в формате 'ГГГГ-ММ-ДД Краткая Суть' (например, '2026-05-21 Результаты пробежки')\n"
+                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй ТЕКУЩУЮ дату (2026-05-21) или дату публикации статьи, а вместо 'Краткая Суть' напиши реальную главную тему статьи (например, '2026-05-21 Разработка игр в Roblox').\n"
                 "CONTENT:\n"
                 "> [!abstract] Резюме\n"
                 "(О чем статья в 1-2 предложениях. Учти комментарий пользователя: " + user_comment + ")\n\n"
                 "## Извлеченные факты и инструменты\n"
                 "- (Название инструмента 1 / Факт 1 — конкретное описание из текста)\n"
                 "- (Название инструмента 2 / Факт 2 — конкретное описание из текста)\n"
-                "- (Продолжай список, выпиши ВСЁ полезное)\n\n"
+                "- (Продолжай список, выпиши ВСЕ полезное)\n\n"
                 "## Связи\n"
                 f"- [Источник]({url})\n"
                 "- (Связи с <OLD_CONTEXT>, иначе 'Нет данных')"
             )
 
+            raw_response = ""
             async with telemetry.track("LLM_Inference_and_Load"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model("hermes3:8b")
-                    safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
-                    raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
+                    try:
+                        safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
+                        raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
+                    finally:
+                        await vram_manager.unload_model("hermes3:8b")
 
-            # Парсинг ответа
             title = "Web_Clip"
             properties = ""
             content = raw_response
@@ -277,7 +279,12 @@ class Orchestrator:
             async with telemetry.track("Obsidian_File_Write"):
                 file_path = writer.create_note(title=title, content=content, custom_properties=properties)
 
-            await memory.memorize_note(note_id=title, content=content, metadata={"source": "Web", "url": url})
+            # Передаем реальный вытащенный title, чтобы в RAG-базе не было файлов "Без названия" или "Web_Clip"
+            await memory.memorize_note(
+                note_id=title, 
+                content=content, 
+                metadata={"source": "Web", "url": url, "title": title, "folder": "00_Inbox"}
+            )
 
             reply = f"✅ Выжимка из статьи сохранена!\n\n📌 *{title}*\n📂 `00_Inbox`"
             await bot.send_message(chat_id=user_id, text=reply, parse_mode="Markdown")
@@ -290,9 +297,7 @@ class Orchestrator:
         try:
             extracted_text = await asyncio.to_thread(url_parser.extract_text, target_url)
             await bot.send_message(chat_id=event.user_id, text=f"✅ Текст скачан ({len(extracted_text)} символов). Извлекаю факты...")
-
             await self._generate_web_note(event.user_id, event.text, target_url, extracted_text)
-
         except ValueError as ve:
             print(f"[Orchestrator] ⚠️ Отказ парсера: {str(ve)}")
             await bot.send_message(chat_id=event.user_id, text=str(ve))
@@ -306,15 +311,26 @@ class Orchestrator:
         await bot.send_message(chat_id=event.user_id, text=f"📄 Изучаю документ: {event.file_name}...")
 
         try:
-            extracted_text = await asyncio.to_thread(document_parser.extract_text, event.file_path)
-            await bot.send_message(chat_id=event.user_id, text=f"✅ Текст извлечен ({len(extracted_text)} символов). Формирую выжимку...")
+            suffix = event.file_path.suffix.lower()
+            extracted_text = ""
 
+            # Роутинг под раздельные парсеры
+            if suffix == ".pdf":
+                extracted_text = await asyncio.to_thread(pdf_parser.parse, event.file_path)
+            elif suffix == ".docx":
+                extracted_text = await asyncio.to_thread(docx_parser.parse, event.file_path)
+            else:
+                await bot.send_message(chat_id=event.user_id, text="❌ Неподдерживаемый формат документа. Используй PDF или DOCX.")
+                return
+
+            if not extracted_text:
+                await bot.send_message(chat_id=event.user_id, text="⚠️ Не удалось извлечь текст из документа.")
+                return
+
+            await bot.send_message(chat_id=event.user_id, text=f"✅ Текст извлечен ({len(extracted_text)} символов). Формирую выжимку...")
             user_comment = f"Документ: {event.file_name}. " + (event.caption if event.caption else "")
             await self._generate_web_note(event.user_id, user_comment, event.file_name, extracted_text)
 
-        except ValueError as ve:
-            print(f"[Orchestrator] ⚠️ Отказ парсера документов: {str(ve)}")
-            await bot.send_message(chat_id=event.user_id, text=str(ve))
         except Exception as e:
             print(f"[Orchestrator] ❌ Ошибка обработки документа: {repr(e)}")
             await bot.send_message(chat_id=event.user_id, text="❌ Произошла ошибка при чтении документа.")
@@ -323,9 +339,9 @@ class Orchestrator:
                 event.file_path.unlink()
                 print(f"[Orchestrator] 🧹 Удален временный документ: {event.file_name}")
 
-    async def handle_voice_event(self, event: VoiceReceivedEvent):
+    def handle_voice_event(self, event: VoiceReceivedEvent):
         task_name = f"Voice_{event.user_id}_{event.audio_path.name}"
-        await task_manager.put(task_name, self._process_voice_pipeline(event))
+        task_manager.put_nowait(task_name, self._process_voice_pipeline(event))
 
     async def _process_voice_pipeline(self, event: VoiceReceivedEvent):
         """Пайплайн: Голос -> STT -> Текст -> Автоматическое построение заметки."""
@@ -339,7 +355,6 @@ class Orchestrator:
 
             text_event = TextReceivedEvent(user_id=event.user_id, text=recognized_text)
             await self._generate_note(text_event)
-
         except Exception as e:
             print(f"[Orchestrator] ❌ Ошибка Voice Pipeline: {repr(e)}")
             await bot.send_message(chat_id=event.user_id, text=f"❌ Ошибка при обработке голосового сообщения: {repr(e)}")
@@ -358,6 +373,7 @@ class Orchestrator:
         sys_prompt = "Ты — AI-ассистент. Анализируй изображения и выдавай ответ только на русском языке."
 
         try:
+            recognized_text = ""
             async with telemetry.track("Vision_Llama_Pipeline"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model("llama3.2-vision")
@@ -378,7 +394,6 @@ class Orchestrator:
             final_text = f"Контекст: Фотография. Подпись пользователя: {event.caption}\n\nЧто увидел AI: {recognized_text}"
             text_event = TextReceivedEvent(user_id=event.user_id, text=final_text)
             await self._generate_note(text_event)
-
         finally:
             if event.photo_path.exists():
                 event.photo_path.unlink()

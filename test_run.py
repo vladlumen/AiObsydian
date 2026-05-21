@@ -1,5 +1,12 @@
-import asyncio
+import sys
 from pathlib import Path
+
+# Добавляем корень проекта в пути поиска модулей Python
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+import asyncio
 from src.infrastructure.task_queue import task_manager
 from src.core.orchestrator import orchestrator
 from src.interfaces.telegram.bot import start_telegram_bot
