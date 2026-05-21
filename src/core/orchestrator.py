@@ -14,6 +14,7 @@ from src.interfaces.telegram.bot import bot
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
 from src.cognitive.memory.semantic import memory
+from src.core.prompt_loader import prompt_loader
 
 URL_REGEX = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)+')
 
@@ -60,28 +61,12 @@ class Orchestrator:
             await bot.send_message(chat_id=event.user_id, text="В локальном архиве ничего не найдено по этому запросу.")
             return
 
-        sys_prompt = (
-            "Ты — аналитик локальной базы знаний. Твоя задача — дать точный, структурированный и визуально аккуратный ответ на вопрос пользователя.\n"
-            "ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. Игнорируй английский язык в метаданных контекста, сам ответ должен быть полностью на русском.\n\n"
-            "ПРАВИЛА АНАЛИЗА КОНТЕКСТА:\n"
-            "1. Используй ИСКЛЮЧИТЕЛЬНО предоставленные факты из блока <CONTEXT>.\n"
-            "2. Если информация в разных фрагментах различается или противоречит друг другу (разные даты, статусы, результаты) — НЕ игнорируй это. Обязательно перечисли все найденные версии фактов.\n"
-            "3. Если данные частично совпадают или дополняют друг друга — синтезируй их в один связный вывод.\n"
-            "4. Отсутствие идеального совпадения НЕ означает отсутствие информации. Используй любые смежные факты из контекста.\n"
-            "5. При конфликте данных отдавай приоритет более новым или подробным фактам.\n"
-            "6. Шаблонный отказ 'В базе нет информации' разрешен ТОЛЬКО в том случае, если в контексте вообще нет ни одного упоминания сущностей из запроса.\n\n"
-            "ТРЕБОВАНИЯ К ФОРМАТИРОВАНИЮ ОТВЕТА:\n"
-            "- Используй списки (буллиты) и жирный шрифт для ключевых показателей (время, скорость, даты, имена, результаты).\n"
-            "- Разделяй логические blocks пустой строкой, избегай плотных стен сплошного текста.\n"
-            "- Добавляй релевантные эмодзи в начале строк для улучшения читаемости (например, 🏃‍♂️ для спорта, 📅 для дат, 📊 для цифр/статистики).\n"
-            "- В самом конце ответа обязательно укажи заголовок файла-источника в формате: `📂 Источник: [[Название_файла]]`.\n\n"
-            f"<CONTEXT>\n{found_context}\n</CONTEXT>"
-        )
+        sys_prompt = prompt_loader.get("search_prompt", context=found_context)
 
         response_text = ""
         async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
             async with vram_manager.inference_lock:
-                await vram_manager.request_model("hermes3:8b", gb_reservation=3)
+                await vram_manager.request_model("hermes3:8b")
                 try:
                     response_text = await llm.generate_text(event.text, system_prompt=sys_prompt)
                 except Exception as e:
@@ -99,29 +84,8 @@ class Orchestrator:
         found_context = await memory.search_relevant_context(event.text, top_k=3)
 
         async with telemetry.track(f"Generate_Note_Pipeline_{event.user_id}"):
-            sys_prompt = (
-                "Ты — системный архитектор. Структурируй ТОЛЬКО данные из блока <NEW_DATA>.\n"
-                "ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ.\n\n"
-            )
-
-            if found_context:
-                sys_prompt += f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n"
-
-            sys_prompt += (
-                "ПРАВИЛО: ЗАПРЕЩЕНО использовать факты из <OLD_CONTEXT> в заголовке (TITLE), резюме, деталях и сущностях. Используй <OLD_CONTEXT> ИСКЛЮЧИТЕЛЬНО для раздела 'Связи'.\n\n"
-                "Формат:\n"
-                "PROPERTIES: тег1, тег2\n"
-                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй СТРОГО текущий 2026 год (сегодня 2026-05-21), а вместо 'Краткая Суть' напиши реальную главную тему на основе <NEW_DATA> (например, '2026-05-21 Результаты пробежки').\n"
-                "CONTENT:\n"
-                "> [!abstract] Резюме\n"
-                "(суть из <NEW_DATA>)\n\n"
-                "## Детали\n"
-                "- (выпиши ВСЕ конкретные факты, названия инструментов/приложений, списки и важные детали из <NEW_DATA>)\n\n"
-                "## Сущности\n"
-                "- (сущности из <NEW_DATA>)\n\n"
-                "## Связи\n"
-                "- (связи с <OLD_CONTEXT>, иначе 'Нет данных')"
-            )
+            old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
+            sys_prompt = prompt_loader.get("generate_note_prompt", old_context_block=old_context_block)
 
             raw_response = ""
             async with telemetry.track("LLM_Inference_and_Load"):
@@ -195,7 +159,7 @@ class Orchestrator:
 
         raw_response = ""
         async with vram_manager.inference_lock:
-            await vram_manager.request_model("hermes3:8b", gb_reservation=3)
+            await vram_manager.request_model("hermes3:8b")
             try:
                 raw_response = await llm.generate_text(event.text, system_prompt=sys_prompt)
             finally:
@@ -222,35 +186,18 @@ class Orchestrator:
         found_context = await memory.search_relevant_context(user_comment + "\n" + extracted_text[:1000], top_k=3)
 
         async with telemetry.track(f"Generate_Web_Note_{user_id}"):
-            sys_prompt = (
-                "Ты — аналитик данных (Data Miner). Твоя единственная задача — извлекать факты, названия, цифры и списки из <ARTICLE_TEXT>.\n"
-                "ЗАПРЕЩЕНО писать общие фразы (например, 'В статье рассказывается о...'). Пиши только конкретику.\n"
-                "ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ.\n\n"
-            )
-
-            if found_context:
-                sys_prompt += f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n"
-
-            sys_prompt += (
-                "Формат:\n"
-                "PROPERTIES: article, web_clip\n"
-                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй ТЕКУЩУЮ дату (2026-05-21) или дату публикации статьи, а вместо 'Краткая Суть' напиши реальную главную тему статьи (например, '2026-05-21 Разработка игр в Roblox').\n"
-                "CONTENT:\n"
-                "> [!abstract] Резюме\n"
-                "(О чем статья в 1-2 предложениях. Учти комментарий пользователя: " + user_comment + ")\n\n"
-                "## Извлеченные факты и инструменты\n"
-                "- (Название инструмента 1 / Факт 1 — конкретное описание из текста)\n"
-                "- (Название инструмента 2 / Факт 2 — конкретное описание из текста)\n"
-                "- (Продолжай список, выпиши ВСЕ полезное)\n\n"
-                "## Связи\n"
-                f"- [Источник]({url})\n"
-                "- (Связи с <OLD_CONTEXT>, иначе 'Нет данных')"
+            old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
+            sys_prompt = prompt_loader.get(
+                "generate_web_note_prompt", 
+                old_context_block=old_context_block,
+                user_comment=user_comment,
+                url=url
             )
 
             raw_response = ""
             async with telemetry.track("LLM_Inference_and_Load"):
                 async with vram_manager.inference_lock:
-                    await vram_manager.request_model("hermes3:8b", gb_reservation=3)
+                    await vram_manager.request_model("hermes3:8b")
                     try:
                         safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
                         raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
