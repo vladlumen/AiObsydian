@@ -13,7 +13,7 @@ class STTService:
         if self.model is None:
             print(f"[STTService] ⏳ Инициализация модели Whisper ({self.model_size})...")
             # compute_type="float16" сильно экономит видеопамять без потери качества
-            self.model = WhisperModel(self.model_size, device="cuda", compute_type="float16")
+            self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
 
     def transcribe(self, audio_path: Path) -> str:
         """Переводит аудио в текст."""
