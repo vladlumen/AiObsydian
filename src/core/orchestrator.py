@@ -81,7 +81,7 @@ class Orchestrator:
         response_text = ""
         async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
             async with vram_manager.inference_lock:
-                await vram_manager.request_model("hermes3:8b")
+                await vram_manager.request_model("hermes3:8b", gb_reservation=3)
                 try:
                     response_text = await llm.generate_text(event.text, system_prompt=sys_prompt)
                 except Exception as e:
@@ -111,7 +111,7 @@ class Orchestrator:
                 "ПРАВИЛО: ЗАПРЕЩЕНО использовать факты из <OLD_CONTEXT> в заголовке (TITLE), резюме, деталях и сущностях. Используй <OLD_CONTEXT> ИСКЛЮЧИТЕЛЬНО для раздела 'Связи'.\n\n"
                 "Формат:\n"
                 "PROPERTIES: тег1, тег2\n"
-                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй ТЕКУЩУЮ дату (2026-05-21) или дату публикации статьи, а вместо 'Краткая Суть' напиши реальную главную тему статьи (например, '2026-05-21 Разработка игр в Roblox') на основе <NEW_DATA>\n"
+                "TITLE: Заголовок строго в формате 'ГГГГ-ММ-ДД Краткая Суть'. Используй СТРОГО текущий 2026 год (сегодня 2026-05-21), а вместо 'Краткая Суть' напиши реальную главную тему на основе <NEW_DATA> (например, '2026-05-21 Результаты пробежки').\n"
                 "CONTENT:\n"
                 "> [!abstract] Резюме\n"
                 "(суть из <NEW_DATA>)\n\n"
@@ -195,7 +195,7 @@ class Orchestrator:
 
         raw_response = ""
         async with vram_manager.inference_lock:
-            await vram_manager.request_model("hermes3:8b")
+            await vram_manager.request_model("hermes3:8b", gb_reservation=3)
             try:
                 raw_response = await llm.generate_text(event.text, system_prompt=sys_prompt)
             finally:
@@ -250,7 +250,7 @@ class Orchestrator:
             raw_response = ""
             async with telemetry.track("LLM_Inference_and_Load"):
                 async with vram_manager.inference_lock:
-                    await vram_manager.request_model("hermes3:8b")
+                    await vram_manager.request_model("hermes3:8b", gb_reservation=3)
                     try:
                         safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
                         raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
@@ -339,9 +339,9 @@ class Orchestrator:
                 event.file_path.unlink()
                 print(f"[Orchestrator] 🧹 Удален временный документ: {event.file_name}")
 
-    def handle_voice_event(self, event: VoiceReceivedEvent):
+    async def handle_voice_event(self, event: VoiceReceivedEvent):
         task_name = f"Voice_{event.user_id}_{event.audio_path.name}"
-        task_manager.put_nowait(task_name, self._process_voice_pipeline(event))
+        await task_manager.put(task_name, self._process_voice_pipeline(event))
 
     async def _process_voice_pipeline(self, event: VoiceReceivedEvent):
         """Пайплайн: Голос -> STT -> Текст -> Автоматическое построение заметки."""
@@ -371,9 +371,9 @@ class Orchestrator:
         user_caption = event.caption if event.caption else "Сделай из этого заметку."
         user_prompt = f"Извлеки весь текст с картинки. Опиши только факты. БЕЗ вступлений, БЕЗ фраз вроде 'Я вижу', 'На изображении'. Запрос пользователя: {user_caption}"
         sys_prompt = "Ты — AI-ассистент. Анализируй изображения и выдавай ответ только на русском языке."
+        recognized_text = ""
 
         try:
-            recognized_text = ""
             async with telemetry.track("Vision_Llama_Pipeline"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model("llama3.2-vision")
@@ -385,15 +385,21 @@ class Orchestrator:
                             model_name="llama3.2-vision"
                         )
                     except Exception as e:
-                        print(f"[Orchestrator] ❌ Ошибка Vision: {repr(e)}")
-                        await bot.send_message(chat_id=event.user_id, text=f"❌ Ошибка анализа фото: {repr(e)}")
+                        print(f"[Orchestrator] ❌ Ошибка внутри Llama Vision: {repr(e)}")
+                        await bot.send_message(chat_id=event.user_id, text="❌ Ошибка при генерации описания изображения.")
                         return
                     finally:
                         await vram_manager.unload_model("llama3.2-vision")
 
-            final_text = f"Контекст: Фотография. Подпись пользователя: {event.caption}\n\nЧто увидел AI: {recognized_text}"
-            text_event = TextReceivedEvent(user_id=event.user_id, text=final_text)
-            await self._generate_note(text_event)
+            if recognized_text:
+                final_text = f"Контекст: Фотография. Подпись пользователя: {event.caption}\n\nЧто увидел AI: {recognized_text}"
+                text_event = TextReceivedEvent(user_id=event.user_id, text=final_text)
+                await self._generate_note(text_event)
+            else:
+                await bot.send_message(chat_id=event.user_id, text="⚠️ Не удалось распознать текст на фото.")
+
+        except Exception as top_e:
+            print(f"[Orchestrator] ❌ Общая ошибка Фото Пайплайна: {repr(top_e)}")
         finally:
             if event.photo_path.exists():
                 event.photo_path.unlink()

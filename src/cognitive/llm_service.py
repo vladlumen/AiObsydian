@@ -65,7 +65,13 @@ class LLMService:
             "prompt": prompt,
             "system": system_prompt,
             "images": [base64_image],
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_ctx": 2048,
+                "num_predict": 512,
+                "temperature": 0.2,
+                "flash_attention": True
+            }
         }
 
         async with httpx.AsyncClient() as client:
