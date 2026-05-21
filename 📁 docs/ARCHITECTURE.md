@@ -34,26 +34,25 @@
 │   │   └── loaders.py           # Физическая загрузка весов в GPU
 │   │
 │   ├── 📁 cognitive/            # LEVEL 2: AI-навыки (Stateless Services)
-│   │   ├── 📁 memory/           # (В разработке)
-│   │   │   ├── conversation.py  # Краткосрочная память
-│   │   │   └── semantic.py      # Долгосрочная память (LanceDB)
-│   │   ├── llm_service.py       # Генерация текста и Vision API (Ollama + base64 + Pillow)
-│   │   └── stt_service.py       # Транскрибация (Faster-Whisper)
+│   │   ├── 📁 memory/           # Модуль памяти
+│   │   │   ├── conversation.py  # Краткосрочная память (планируется)
+│   │   │   └── semantic.py      # Долгосрочная память (LanceDB) — активно используется
+│   │   ├── llm_service.py       # Генерация текста (Ollama)
+│   │   ├── vision_service.py    # Анализ изображений (Ollama Vision) — планируется
+│   │   └── stt_service.py       # Транскрибация (Faster-Whisper) — активно используется
 │   │
 │   ├── 📁 agents/               # LEVEL 3: Бизнес-логика (Поведение)
-│   │   ├── clerk_agent.py       # (В разработке) Сортировщик 00_Inbox
-│   │   └── obsidian_writer.py   # Очистка имен файлов и атомарная запись в базу (Windows)
+│   │   ├── clerk_agent.py       # Сортировщик 00_Inbox (активно используется)
+│   │   ├── obsidian_writer.py   # Очистка имен файлов и атомарная запись в базу (Windows)
+│   │   └── parsers/             # Извлекатели текста
+│   │       ├── url_parser.py    # Веб-страницы
+│   │       └── document_parser.py  # PDF, DOCX
 │   │
 │   ├── 📁 interfaces/           # Внешний мир
 │   │   └── telegram/
 │   │       ├── bot.py           # Aiogram setup
 │   │       └── handlers.py      # Ловит text/voice/photo -> публикует в EventBus
-│   │
-│   ├── 📁 parsers/              # (В разработке) Извлекатели текста
-│   │   ├── pdf_parser.py
-│   │   └── docx_parser.py
-│   │
 │   └── 📁 storage/              # Физическая работа с диском
-│       ├── vector_store.py      # (В разработке) LanceDB
-│       └── sqlite_manager.py    # (В разработке) Сохранение стейтов
+│       ├── vector_store.py      # LanceDB wrapper (активно используется)
+│       └── sqlite_manager.py    # Сохранение стейтов (планируется)
 └── 📁 data/                     # Временные файлы и БД (Игнорируется Git)

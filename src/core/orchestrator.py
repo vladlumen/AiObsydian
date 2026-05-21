@@ -29,43 +29,66 @@ class Orchestrator:
     async def handle_text_event(self, event: TextReceivedEvent):
         """Роутер текста: Поиск, Схемы, Сортировка, Ссылки или Инжест заметки."""
         text_lower = event.text.lower().strip()
+        
         urls = URL_REGEX.findall(event.text)
-
-        if urls:
-            await task_manager.put(f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0]))
-        elif text_lower.startswith("?"):
-            event.text = event.text[1:].strip()
+        
+        # Если текст начинается или заканчивается знаком вопроса — это поиск
+        if text_lower.startswith("?") or text_lower.endswith("?"):
+            if text_lower.startswith("?"):
+                event.text = event.text[1:].strip()
             await task_manager.put(f"Search_{event.user_id}", self._process_text(event))
+            
         elif text_lower.startswith("!схема"):
             event.text = event.text.replace("!схема", "", 1).strip()
             await task_manager.put(f"Canvas_{event.user_id}", self._generate_canvas(event))
+            
         elif text_lower == "!сортировка":
             await task_manager.put(f"Clerk_{event.user_id}", self._run_clerk(event))
+            
+        elif urls:
+            await task_manager.put(f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0]))
+            
         else:
             await task_manager.put(f"Note_{event.user_id}", self._generate_note(event))
 
     async def _process_text(self, event: TextReceivedEvent):
-        """Пайплайн: Поиск в памяти -> Формирование промпта -> LLM -> Сохранение."""
-        print(f"[Orchestrator] 📝 Запуск текстового пайплайна от {event.user_id}")
+        """Пайплайн: Поиск в векторной памяти -> Формирование промпта -> LLM -> Ответ."""
+        print(f"[Orchestrator] 🔍 Запуск поиска по базе для {event.user_id}")
         await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-        found_context = await memory.search_relevant_context(event.text, top_k=3)
-        context_prompt = ""
-        if found_context:
-            context_prompt = f"\n\nИСТОРИЧЕСКИЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ (Используй эти данные, если они помогают точнее ответить на запрос):\n{found_context}"
+        # Вытаскиваем топ-5 кусков контекста
+        found_context = await memory.search_relevant_context(event.text, top_k=5)
+        
+        # Строка для дебага — в консоли будет видно, что именно нашла база
+        print(f"\n[DEBUG RAG] База нашла следующий контекст:\n{found_context}\n")
+        
+        if not found_context:
+            await bot.send_message(chat_id=event.user_id, text="В локальном архиве ничего не найдено по этому запросу.")
+            return
 
+        # Настройка красивого и структурированного Markdown-вывода
         sys_prompt = (
-            "Ты — аналитик базы знаний. Твоя задача — превратить поток мыслей пользователя в структурированную заметку "
-            "или ответить на его вопрос, опираясь на исторический контекст (если он предоставлен).\n"
-            "ПРАЛИЛО 1: Обязательно оборачивай ключевые имена и технологии в двойные квадратные скобки: [[Имя]], [[Технология]].\n"
-            "ПРАВИЛО 2: Заметка ДОЛЖНА БЫТЬ НАПИСАНА СТРОГО НА РУССКОМ ЯЗЫКЕ.\n"
-            "Отвечай в формате Markdown."
-            + context_prompt
+            "Ты — аналитик локальной базы знаний. Твоя задача — дать точный, структурированный и визуально аккуратный ответ на вопрос пользователя.\n\n"
+            "ПРАВИЛА АНАЛИЗА КОНТЕКСТА:\n"
+            "1. Используй ИСКЛЮЧИТЕЛЬНО предоставленные факты из блока <CONTEXT>.\n"
+            "2. Если информация в разных фрагментах различается или противоречит друг другу (разные даты, статусы, результаты) — НЕ игнорируй это. Обязательно перечисли все найденные версии фактов.\n"
+            "3. Если данные частично совпадают или дополняют друг друга — синтезируй их в один связный вывод.\n"
+            "4. Отсутствие идеального совпадения НЕ означает отсутствие информации. Используй любые смежные факты из контекста.\n"
+            "5. При конфликте данных отдавай приоритет более новым или подробным фактам.\n"
+            "6. Шаблонный отказ 'В базе нет информации' разрешен ТОЛЬКО в том случае, если в контексте вообще нет ни одного упоминания сущностей из запроса.\n\n"
+            "ТРЕБОВАНИЯ К ФОРМАТИРОВАНИЮ ОТВЕТА:\n"
+            "- Используй списки (буллиты) и жирный шрифт для ключевых показателей (время, скорость, даты, имена, результаты).\n"
+            "- Разделяй логические блоки пустой строкой, избегай плотных стен сплошного текста.\n"
+            "- Добавляй релевантные эмодзи в начале строк для улучшения читаемости (например, 🏃‍♂️ для спорта, 📅 для дат, 📊 для цифр/статистики).\n"
+            "- В самом конце ответа обязательно укажи заголовок файла-источника в формате: `📂 Источник: [[Название_файла]]`.\n\n"
+            f"<CONTEXT>\n{found_context}\n</CONTEXT>"
         )
 
         response_text = ""
-        async with telemetry.track(f"Text_Pipeline_{event.user_id}"):
+        async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
             async with vram_manager.inference_lock:
+                # На твоей RTX 3090 gemma2:27b отработает этот промпт идеально. 
+                # Если переключаешься на неё, просто замени строку ниже на "gemma2:27b"
                 await vram_manager.request_model("hermes3:8b")
                 try:
                     response_text = await llm.generate_text(
@@ -74,11 +97,11 @@ class Orchestrator:
                     )
                 except Exception as e:
                     print(f"[Orchestrator] ❌ Ошибка LLM: {repr(e)}")
-                    response_text = "❌ Ошибка генерации текста."
+                    response_text = "❌ Ошибка генерации ответа."
                 finally:
                     await vram_manager.unload_model("hermes3:8b")
 
-        await bot.send_message(chat_id=event.user_id, text=response_text, parse_mode="Markdown")
+        await bot.send_message(chat_id=event.user_id, text=response_text)
 
     async def _generate_note(self, event: TextReceivedEvent):
         """Пайплайн создания структурированной заметки с учетом контекста RAG."""
@@ -99,7 +122,7 @@ class Orchestrator:
                 "ПРАВИЛО: ЗАПРЕЩЕНО использовать факты из <OLD_CONTEXT> в заголовке (TITLE), резюме, деталях и сущностях. Используй <OLD_CONTEXT> ИСКЛЮЧИТЕЛЬНО для раздела 'Связи'.\n\n"
                 "Формат:\n"
                 "PROPERTIES: тег1, тег2\n"
-                "TITLE: Заголовок на основе <NEW_DATA>\n"
+                "TITLE: Заголовок в формате 'ГГГГ-ММ-ДД Краткая Суть' (например, '2026-05-21 Результаты пробежки') на основе <NEW_DATA>\n"
                 "CONTENT:\n"
                 "> [!abstract] Резюме\n"
                 "(суть из <NEW_DATA>)\n\n"
@@ -212,7 +235,7 @@ class Orchestrator:
             sys_prompt += (
                 "Формат:\n"
                 "PROPERTIES: article, web_clip\n"
-                "TITLE: Короткий заголовок статьи\n"
+                "TITLE: Заголовок в формате 'ГГГГ-ММ-ДД Краткая Суть' (например, '2026-05-21 Результаты пробежки')\n"
                 "CONTENT:\n"
                 "> [!abstract] Резюме\n"
                 "(О чем статья в 1-2 предложениях. Учти комментарий пользователя: " + user_comment + ")\n\n"

@@ -1,6 +1,7 @@
 import lancedb
 import asyncio
 import pyarrow as pa
+import json
 from pathlib import Path
 from typing import List, Dict, Any
 
