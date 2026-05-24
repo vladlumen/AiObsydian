@@ -10,6 +10,7 @@ from src.agents.clerk_agent import clerk
 from src.parsers.url_parser import url_parser
 from src.parsers.pdf_parser import pdf_parser
 from src.parsers.docx_parser import docx_parser
+from src.parsers.video_parser import video_parser
 from src.interfaces.telegram.bot import bot 
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
@@ -28,7 +29,7 @@ class Orchestrator:
         print("[Orchestrator] Поднялся и слушает шину событий.")
 
     async def handle_text_event(self, event: TextReceivedEvent):
-        """Роутер текста: Поиск, Схемы, Сортировка, Ссылки или Инжест заметки."""
+        """Роутер текста: Поиск, Схемы, Сортировка, Видео, Ссылки или Инжест заметки."""
         text_lower = event.text.lower().strip()
         urls = URL_REGEX.findall(event.text)
         
@@ -45,7 +46,12 @@ class Orchestrator:
             await task_manager.put(f"Clerk_{event.user_id}", self._run_clerk(event))
             
         elif urls:
-            await task_manager.put(f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0]))
+            target_url = urls[0].lower()
+            # ВРЕЗКА: если ссылка ведет на TikTok или YouTube Shorts
+            if "tiktok.com" in target_url or "youtube.com/shorts" in target_url or "youtu.be" in target_url:
+                await task_manager.put(f"Video_{event.user_id}", self._process_video_pipeline(event, urls[0]))
+            else:
+                await task_manager.put(f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0]))
             
         else:
             await task_manager.put(f"Note_{event.user_id}", self._generate_note(event))
@@ -107,6 +113,15 @@ class Orchestrator:
                 return ""
             finally:
                 await vram_manager.unload_model(model_name)
+    async def _run_clerk(self, event: TextReceivedEvent):
+        """Запускает сортировщика с замером телеметрии."""
+        print("[Orchestrator] 🧹 Выбран маршрут: Сортировка (Clerk)")
+        await bot.send_message(chat_id=event.user_id, text="⏳ Запускаю Clerk Agent. Анализирую Inbox...")
+
+        async with telemetry.track("Clerk_Sorting_Pipeline"):
+            report = await clerk.run_sorting()
+
+        await bot.send_message(chat_id=event.user_id, text=report, parse_mode="Markdown")
 
     async def _generate_note(self, event: TextReceivedEvent):
         """Пайплайн создания структурированной заметки с поддержкой режима сравнения (Бенчмарк)."""
@@ -327,5 +342,41 @@ class Orchestrator:
             if event.photo_path.exists():
                 event.photo_path.unlink()
                 print(f"[Orchestrator] 🧹 Удален временный файл изображения: {event.photo_path.name}")
+
+    async def _process_video_pipeline(self, event: TextReceivedEvent, target_url: str):
+        """Пайплайн: Ссылка на видео -> Вытягивание аудио -> STT -> Создание заметки."""
+        print(f"[Orchestrator] 🎬 Запуск анализа медиа-ссылки от {event.user_id}")
+        await bot.send_message(chat_id=event.user_id, text="🎬 Обнаружил ссылку на видео. Выкачиваю аудиодорожку...")
+
+        try:
+            # 1. Скачиваем аудиодорожку через yt-dlp
+            audio_path = await video_parser.extract_audio(target_url)
+            await bot.send_message(chat_id=event.user_id, text="📥 Звук извлечен. Расшифровываю речь через Whisper...")
+
+            print(f"[Orchestrator] 🎙️ Аудиодорожка скачана в {audio_path}. Передаю в STT...")
+
+            # 2. Переводим звук в текст через твой STT
+            recognized_text = await asyncio.to_thread(stt.transcribe, audio_path)
+            print(f"[Orchestrator] 🗣️ Видео распознано: {recognized_text}")
+
+            if not recognized_text.strip():
+                await bot.send_message(chat_id=event.user_id, text="⚠️ Не удалось разобрать речь в этом видео.")
+                return
+
+            await bot.send_message(chat_id=event.user_id, text=f"🗣️ *Текст из видео расшифрован!*\nФормирую структурированную заметку...")
+
+            # 3. Передаем текст в пайплайн создания заметок
+            final_text = f"Контекст: Выжимка видео по ссылке {target_url}.\n\nТекст из видео:\n{recognized_text}"
+            text_event = TextReceivedEvent(user_id=event.user_id, text=final_text)
+            await self._generate_note(text_event)
+
+        except Exception as e:
+            print(f"[Orchestrator] ❌ Ошибка Video Pipeline: {repr(e)}")
+            await bot.send_message(chat_id=event.user_id, text=f"❌ Не удалось обработать видео: {repr(e)}")
+        finally:
+            # 4. Чистим за собой временный .mp3 файл
+            if 'audio_path' in locals() and audio_path.exists():
+                audio_path.unlink()
+                print(f"[Orchestrator] 🧹 Удален временный аудиофайл видео: {audio_path.name}")
 
 orchestrator = Orchestrator()
