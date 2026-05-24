@@ -15,8 +15,11 @@ async def main():
 
     # Жестко включаем режим сравнения на время этого теста
     config.COMPARE_MODE = True
+    # Устанавливаем thinking_budget = 0 для отключения скрытых рассуждений
+    config.THINKING_BUDGET = 0
     print(f"[Benchmark] Режим сравнения АКТИВИРОВАН.")
-    print(f"[Benchmark] Тестируемые модели: {list(config.AVAILABLE_MODELS.values())}\n")
+    print(f"[Benchmark] Тестируемые модели: {list(config.AVAILABLE_MODELS.values())}")
+    print(f"[Benchmark] Thinking budget: {config.THINKING_BUDGET} (отключено)\n")
 
     # Инициализация воркера очереди
     worker_task = asyncio.create_task(task_manager.start_workers())

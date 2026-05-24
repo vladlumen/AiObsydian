@@ -28,11 +28,13 @@ from src.models.registry import MODEL_REGISTRY
 # Ключ — то, что ты пишешь в ТГ. Значение — точный тег в Ollama.
 AVAILABLE_MODELS = {
     "hermes": "hermes3:8b",
-    "qwen": "qwen3.5:latest"
+    "qwen": "qwen3.5:9b"  # Вот здесь жестко фиксируем твою новую модель
 }
 
-# По умолчанию на старте пусть стоит быстрый Hermes, переключишься в ТГ когда надо
-CURRENT_LLM_MODEL = AVAILABLE_MODELS["hermes"]
+# По умолчанию используем Qwen как основную модель
+CURRENT_LLM_MODEL = AVAILABLE_MODELS["qwen"]
 
-# Режим сравнения моделей (True — шлем запрос во все модели, False — только в активную)
-COMPARE_MODE = False
+# --- НАСТРОЙКИ LLM ---
+# Контроль скрытых рассуждений (CoT) для моделей, которые это поддерживают
+# 0 - отключить скрытые рассуждения, -1 - использовать значение по умолчанию модели
+THINKING_BUDGET = 0

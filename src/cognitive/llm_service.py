@@ -3,6 +3,7 @@ import httpx
 from io import BytesIO
 from PIL import Image
 from ollama import AsyncClient
+from src.core import config
 
 class LLMService:
     def __init__(self, default_model: str = "hermes3:8b"):
@@ -40,10 +41,11 @@ class LLMService:
             response = await self.client.chat(
                 model=model_to_use,
                 messages=messages,
+                think=False,  # Отключаем режим размышлений (CoT) для моделей, которые это поддерживают
                 options={
                     "temperature": 0.3,
-                    # Если Оллама поддерживает прямой флаг для новых Qwen:
-                    "thinking_budget": 0  # Срезает скрытые рассуждения в ноль
+                    # Контроль скрытых рассуждений из конфигурации (оставляем для совместимости)
+                    "thinking_budget": config.THINKING_BUDGET
                 }
             )
             return response['message']['content'].strip()
@@ -74,11 +76,12 @@ class LLMService:
             "system": system_prompt,
             "images": [base64_image],
             "stream": False,
+            "think": False,  # Отключаем режим размышлений (CoT) для моделей, которые это поддерживают
             "options": {
                 "num_ctx": 2048,
                 "num_predict": 512,
                 "temperature": 0.3,
-                "thinking_budget": 0,  # Срезает скрытые рассуждения в ноль
+                "thinking_budget": config.THINKING_BUDGET,  # Контроль скрытых рассуждений
                 "flash_attention": True
             }
         }
