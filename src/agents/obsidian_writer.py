@@ -20,10 +20,17 @@ class ObsidianWriter:
         clean = clean[:60].strip()
         return clean if clean else f"Idea_{datetime.now().strftime('%Y%m%d_%H%M')}"
 
-    def create_note(self, title: str, content: str, custom_properties: str = "") -> Path:
+    def create_note(self, title: str, content: str, custom_properties: str = "", model_name: str = "hermes3:8b") -> Path:
         """Создает заметку с жестко заданным системным YAML и контентом."""
         clean_title = self._sanitize_filename(title)
         
+        # Словарь тегов для моделей
+        model_tags = {
+            "hermes3:8b": "hermes3-8b",
+            "qwen3.5:latest": "qwen35-8b"
+        }
+        model_tag = model_tags.get(model_name, "unknown-model")
+
         # Собираем железобетонный YAML Frontmatter
         # Даже если LLM ошибется, структура файла не сломается
         yaml_block = (
@@ -31,9 +38,11 @@ class ObsidianWriter:
             f"title: \"{clean_title}\"\n"
             f"created: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
             "type: inbox\n"
+            f"llm_model: \"{model_name}\"\n"
             "ai_generated: true\n"
             "tags:\n"
             "  - status/new\n"
+            f"  - {model_tag}\n"
             "  - ai_note\n"
         )
         

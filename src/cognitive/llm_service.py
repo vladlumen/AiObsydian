@@ -19,7 +19,7 @@ class LLMService:
         except Exception:
             return False
 
-    async def generate_text(self, user_text: str, system_prompt: str = "") -> str:
+    async def generate_text(self, user_text: str, system_prompt: str = "", model: str = None) -> str:
         """Отправляет запрос в локальную Ollama."""
         # 1. Сначала проверяем пульс
         if not await self.is_alive():
@@ -30,12 +30,15 @@ class LLMService:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-             
+          
         messages.append({"role": "user", "content": user_text})
+
+        # Используем переданную модель или модель по умолчанию
+        model_to_use = model or self.default_model
 
         try:
             response = await self.client.chat(
-                model=self.default_model,
+                model=model_to_use,
                 messages=messages
             )
             return response['message']['content'].strip()

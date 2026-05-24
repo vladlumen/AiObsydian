@@ -28,16 +28,22 @@ class VRAMScheduler:
             
         profile = MODEL_REGISTRY[model_name]
         
+        # Безопасное извлечение значения VRAM как из объекта, так и из словаря
+        if isinstance(profile, dict):
+            vram_required = profile.get("vram_required_mb") or profile.get("vram_required", 0)
+        else:
+            vram_required = getattr(profile, "vram_required_mb", 0) or getattr(profile, "vram_required", 0)
+        
         async with self._state_lock:
             current_state = self.active_models.get(model_name, ModelState.UNLOADED)
             
             if current_state == ModelState.READY:
                 return  # Уже в памяти, можно использовать
                 
-            print(f"[VRAM] Запрос на загрузку {model_name} (Требуется {profile.vram_required_mb} MB)")
+            print(f"[VRAM] Запрос на загрузку {model_name} (Требуется {vram_required} MB)")
             
             # Проверяем, влезет ли. Если нет - тут позже добавим логику выгрузки других моделей
-            if self.used_vram_mb + profile.vram_required_mb > self.total_vram_mb:
+            if self.used_vram_mb + vram_required > self.total_vram_mb:
                 print(f"[VRAM] ⚠️ ВНИМАНИЕ: Возможен OOM! Занято: {self.used_vram_mb}/{self.total_vram_mb}")
                 # TODO: Вызвать unload_model() для наименее нужной модели
             
@@ -48,7 +54,7 @@ class VRAMScheduler:
         await asyncio.sleep(1) # Здесь позже будет реальный вызов Ollama/Whisper API
         
         async with self._state_lock:
-            self.used_vram_mb += profile.vram_required_mb
+            self.used_vram_mb += vram_required
             self.active_models[model_name] = ModelState.READY
             print(f"[VRAM] ✅ {model_name} готова. VRAM занято: {self.used_vram_mb}/{self.total_vram_mb} MB")
 
@@ -57,12 +63,18 @@ class VRAMScheduler:
         async with self._state_lock:
             if self.active_models.get(model_name) in [ModelState.READY, ModelState.BUSY]:
                 profile = MODEL_REGISTRY[model_name]
+                # Безопасное извлечение VRAM для универсальности
+                if isinstance(profile, dict):
+                    vram_required = profile.get("vram_required_mb") or profile.get("vram_required", 0)
+                else:
+                    vram_required = getattr(profile, "vram_required_mb", 0) or getattr(profile, "vram_required", 0)
+
                 print(f"[VRAM] 🧹 Выгрузка {model_name} из GPU...")
                 
                 # Симуляция выгрузки
                 await asyncio.sleep(0.5) 
                 
-                self.used_vram_mb -= profile.vram_required_mb
+                self.used_vram_mb -= vram_required
                 self.active_models[model_name] = ModelState.UNLOADED
                 print(f"[VRAM] 🗑️ {model_name} выгружена. Свободно VRAM: {self.total_vram_mb - self.used_vram_mb} MB")
 

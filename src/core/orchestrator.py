@@ -15,6 +15,7 @@ from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
 from src.cognitive.memory.semantic import memory
 from src.core.prompt_loader import prompt_loader
+from src.core import config
 
 URL_REGEX = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)+')
 
@@ -63,44 +64,72 @@ class Orchestrator:
 
         sys_prompt = prompt_loader.get("search_prompt", context=found_context)
 
-        response_text = ""
-        async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
-            async with vram_manager.inference_lock:
-                await vram_manager.request_model("hermes3:8b")
-                try:
-                    response_text = await llm.generate_text(event.text, system_prompt=sys_prompt)
-                except Exception as e:
-                    print(f"[Orchestrator] ❌ Ошибка LLM: {repr(e)}")
-                    response_text = "❌ Ошибка генерации ответа."
-                finally:
-                    await vram_manager.unload_model("hermes3:8b")
+        if config.COMPARE_MODE:
+            for model_alias, model_name in config.AVAILABLE_MODELS.items():
+                print(f"[Orchestrator] 📊 Бенчмарк: Запуск {model_name}...")
+                response_text = ""
+                async with telemetry.track(f"Compare_{model_alias}_{event.user_id}"):
+                    async with vram_manager.inference_lock:
+                        await vram_manager.request_model(model_name)
+                        try:
+                            response_text = await llm.generate_text(event.text, system_prompt=sys_prompt, model=model_name)
+                        except Exception as e:
+                            print(f"[Orchestrator] ❌ Ошибка LLM ({model_name}): {repr(e)}")
+                            response_text = "❌ Ошибка генерации ответа."
+                        finally:
+                            await vram_manager.unload_model(model_name)
+                await bot.send_message(
+                    chat_id=event.user_id,
+                    text=f"🧠 **Ответ от {model_alias.upper()} ({model_name}):**\n\n{response_text}"
+                )
+        else:
+            response_text = ""
+            async with telemetry.track(f"Search_Pipeline_{event.user_id}"):
+                async with vram_manager.inference_lock:
+                    await vram_manager.request_model(config.CURRENT_LLM_MODEL)
+                    try:
+                        response_text = await llm.generate_text(event.text, system_prompt=sys_prompt, model=config.CURRENT_LLM_MODEL)
+                    except Exception as e:
+                        print(f"[Orchestrator] ❌ Ошибка LLM: {repr(e)}")
+                        response_text = "❌ Ошибка генерации ответа."
+                    finally:
+                        await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
+            await bot.send_message(chat_id=event.user_id, text=response_text)
 
-        await bot.send_message(chat_id=event.user_id, text=response_text)
+    async def _execute_llm_inference(self, user_id: int, model_name: int, prompt: str, sys_prompt: str) -> str:
+        """Инфраструктурный хелпер для безопасного вызова одиночной LLM через планировщик VRAM."""
+        async with vram_manager.inference_lock:
+            await vram_manager.request_model(model_name)
+            try:
+                return await llm.generate_text(prompt, system_prompt=sys_prompt, model=model_name)
+            except Exception as e:
+                print(f"[Orchestrator] ❌ Ошибка генерации на модели {model_name}: {e}")
+                return ""
+            finally:
+                await vram_manager.unload_model(model_name)
 
     async def _generate_note(self, event: TextReceivedEvent):
-        """Пайплайн создания структурированной заметки с учетом контекста RAG."""
+        """Пайплайн создания структурированной заметки с поддержкой режима сравнения (Бенчмарк)."""
         print(f"[Orchestrator] 📂 Запуск генерации заметки Ideaverse для {event.user_id}")
-
         found_context = await memory.search_relevant_context(event.text, top_k=3)
+        old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
+        sys_prompt = prompt_loader.get("generate_note_prompt", old_context_block=old_context_block)
+        safe_prompt = f"<NEW_DATA>\n{event.text}\n</NEW_DATA>"
 
-        async with telemetry.track(f"Generate_Note_Pipeline_{event.user_id}"):
-            old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
-            sys_prompt = prompt_loader.get("generate_note_prompt", old_context_block=old_context_block)
+        # Карточки моделей для итерации
+        models_to_run = config.AVAILABLE_MODELS.items() if config.COMPARE_MODE else [("CURRENT", config.CURRENT_LLM_MODEL)]
 
+        for model_alias, model_name in models_to_run:
+            print(f"[Orchestrator] ⚙️ Генерация заметки на модели: {model_name}")
             raw_response = ""
-            async with telemetry.track("LLM_Inference_and_Load"):
-                async with vram_manager.inference_lock:
-                    await vram_manager.request_model("hermes3:8b")
-                    try:
-                        safe_prompt = f"<NEW_DATA>\n{event.text}\n</NEW_DATA>"
-                        raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
-                    except Exception as e:
-                        print(f"[Orchestrator] ❌ Ошибка генерации заметки: {e}")
-                        return
-                    finally:
-                        await vram_manager.unload_model("hermes3:8b")
+            async with telemetry.track(f"LLM_Inference_{model_alias}"):
+                raw_response = await self._execute_llm_inference(event.user_id, model_name, safe_prompt, sys_prompt)
 
-            title = "Новая идея"
+            if not raw_response:
+                continue
+
+            # Парсинг структуры Markdown
+            title = f"Новая идея ({model_alias.upper()})"
             properties = ""
             content = raw_response
 
@@ -119,92 +148,41 @@ class Orchestrator:
             content = re.sub(r'PROPERTIES:.*?\n', '', content, flags=re.IGNORECASE).strip()
             content = content.replace("> !abstract", "> [!abstract]")
 
+            # Запись на диск Windows (Obsidian) и регистрация в LanceDB
             async with telemetry.track("Obsidian_File_Write"):
-                file_path = writer.create_note(title=title, content=content, custom_properties=properties)
+                file_path = writer.create_note(title=title, content=content, custom_properties=properties, model_name=model_name)
 
-            await memory.memorize_note(note_id=title, content=content, metadata={"source": "Telegram_Ingest", "title": title})
+            await memory.memorize_note(note_id=title, content=content, metadata={"source": f"Telegram_Benchmark_{model_alias}", "title": title})
 
-            reply = f"✅ Структурированная заметка создана и добавлена в индекс памяти!\n\n📌 *{title}*\n📂 `00_Inbox`"
+            reply = f"📊 **Заметка от модели {model_alias.upper()} ({model_name}):**\n✅ Создана и добавлена в индекс памяти!\n\n📌 *{title}*\n📂 `00_Inbox`"
             await bot.send_message(chat_id=event.user_id, text=reply, parse_mode="Markdown")
-
-    async def _run_clerk(self, event: TextReceivedEvent):
-        """Запускает сортировщика с замером телеметрии."""
-        print("[Orchestrator] 🧹 Выбран маршрут: Сортировка (Clerk)")
-        await bot.send_message(chat_id=event.user_id, text="⏳ Запускаю Clerk Agent. Анализирую Inbox...")
-
-        async with telemetry.track("Clerk_Sorting_Pipeline"):
-            report = await clerk.run_sorting()
-
-        await bot.send_message(chat_id=event.user_id, text=report, parse_mode="Markdown")
-
-    async def _generate_canvas(self, event: TextReceivedEvent):
-        """Пайплайн генерации .canvas майнд-мапы."""
-        print(f"[Orchestrator] 🗺️ Выбран маршрут: Canvas")
-
-        sys_prompt = (
-            "Ты — системный архитектор. Преврати запрос в структуру для графа (mind map).\n"
-            "Выдай СТРОГО валидный JSON без комментариев и оберток (без ```json).\n"
-            "Формат:\n"
-            "{\n"
-            "  \"title\": \"Название схемы\",\n"
-            "  \"nodes\": [\n"
-            "    {\"id\": \"1\", \"text\": \"Шаг 1: Описание\"},\n"
-            "    {\"id\": \"2\", \"text\": \"Шаг 2: Описание\"}\n"
-            "  ],\n"
-            "  \"edges\": [\n"
-            "    {\"from\": \"1\", \"to\": \"2\"}\n"
-            "  ]\n"
-            "}"
-        )
-
-        raw_response = ""
-        async with vram_manager.inference_lock:
-            await vram_manager.request_model("hermes3:8b")
-            try:
-                raw_response = await llm.generate_text(event.text, system_prompt=sys_prompt)
-            finally:
-                await vram_manager.unload_model("hermes3:8b")
-
-        clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_response.strip(), flags=re.MULTILINE)
-
-        try:
-            structure = json.loads(clean_json)
-            title = structure.get("title", "Новая схема")
-            file_path = writer.create_canvas(title=title, structure=structure)
-            reply = f"✅ Майнд-мапа создана!\n📌 *{title}*\n📂 `00_Inbox` (.canvas)"
-            await bot.send_message(chat_id=event.user_id, text=reply, parse_mode="Markdown")
-        except json.JSONDecodeError as e:
-            print(f"[Orchestrator] ❌ Ошибка парсинга JSON: {raw_response}")
-            await bot.send_message(chat_id=event.user_id, text="❌ Ошибка: LLM выдала неверный формат структуры.")
-        except Exception as e:
-            await bot.send_message(chat_id=event.user_id, text=f"❌ Ошибка записи Canvas: {e}")
 
     async def _generate_web_note(self, user_id: int, user_comment: str, url: str, extracted_text: str):
-        """Специализированный пайплайн для экстракции фактов из статей."""
+        """Пайплайн экстракции фактов из статей и документов с поддержкой Бенчмарка."""
         print(f"[Orchestrator] 📂 Запуск генерации WEB-заметки для {user_id}")
-
         found_context = await memory.search_relevant_context(user_comment + "\n" + extracted_text[:1000], top_k=3)
+        old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
+        
+        sys_prompt = prompt_loader.get(
+            "generate_web_note_prompt", 
+            old_context_block=old_context_block,
+            user_comment=user_comment,
+            url=url
+        )
+        safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
 
-        async with telemetry.track(f"Generate_Web_Note_{user_id}"):
-            old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
-            sys_prompt = prompt_loader.get(
-                "generate_web_note_prompt", 
-                old_context_block=old_context_block,
-                user_comment=user_comment,
-                url=url
-            )
+        models_to_run = config.AVAILABLE_MODELS.items() if config.COMPARE_MODE else [("CURRENT", config.CURRENT_LLM_MODEL)]
 
+        for model_alias, model_name in models_to_run:
+            print(f"[Orchestrator] ⚙️ Извлечение фактов на модели: {model_name}")
             raw_response = ""
-            async with telemetry.track("LLM_Inference_and_Load"):
-                async with vram_manager.inference_lock:
-                    await vram_manager.request_model("hermes3:8b")
-                    try:
-                        safe_prompt = f"<ARTICLE_TEXT>\n{extracted_text}\n</ARTICLE_TEXT>"
-                        raw_response = await llm.generate_text(safe_prompt, system_prompt=sys_prompt)
-                    finally:
-                        await vram_manager.unload_model("hermes3:8b")
+            async with telemetry.track(f"LLM_Web_Inference_{model_alias}"):
+                raw_response = await self._execute_llm_inference(user_id, model_name, safe_prompt, sys_prompt)
 
-            title = "Web_Clip"
+            if not raw_response:
+                continue
+
+            title = f"Web_Clip_{model_alias.upper()}"
             properties = ""
             content = raw_response
 
@@ -224,16 +202,15 @@ class Orchestrator:
             content = content.replace("> !abstract", "> [!abstract]")
 
             async with telemetry.track("Obsidian_File_Write"):
-                file_path = writer.create_note(title=title, content=content, custom_properties=properties)
+                file_path = writer.create_note(title=title, content=content, custom_properties=properties, model_name=model_name)
 
-            # Передаем реальный вытащенный title, чтобы в RAG-базе не было файлов "Без названия" или "Web_Clip"
             await memory.memorize_note(
                 note_id=title, 
                 content=content, 
-                metadata={"source": "Web", "url": url, "title": title, "folder": "00_Inbox"}
+                metadata={"source": f"Web_Benchmark_{model_alias}", "url": url, "title": title, "folder": "00_Inbox"}
             )
 
-            reply = f"✅ Выжимка из статьи сохранена!\n\n📌 *{title}*\n📂 `00_Inbox`"
+            reply = f"📊 **Выжимка от модели {model_alias.upper()} ({model_name}):**\n✅ Сохранена в Obsidian!\n\n📌 *{title}*\n📂 `00_Inbox`"
             await bot.send_message(chat_id=user_id, text=reply, parse_mode="Markdown")
 
     async def _process_url_pipeline(self, event: TextReceivedEvent, target_url: str):
@@ -261,7 +238,6 @@ class Orchestrator:
             suffix = event.file_path.suffix.lower()
             extracted_text = ""
 
-            # Роутинг под раздельные парсеры
             if suffix == ".pdf":
                 extracted_text = await asyncio.to_thread(pdf_parser.parse, event.file_path)
             elif suffix == ".docx":
