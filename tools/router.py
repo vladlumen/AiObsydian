@@ -1,6 +1,6 @@
 import re
 import ollama
-from logger import agent_logger
+from src.infrastructure import logger
 
 class TaskRouter:
     # Расширенный список ключевых слов
@@ -17,11 +17,11 @@ class TaskRouter:
         # 1. Regex Stage
         for intent, pattern in TaskRouter.INTENT_PATTERNS.items():
             if re.search(pattern, query_lc):
-                agent_logger.info("Router", f"Regex match: {intent}")
+                logger.agent_logger.info("Router", f"Regex match: {intent}")
                 return intent
 
         # 2. LLM Stage с усиленным промптом
-        agent_logger.info("Router", "Regex не сработал. Запрос к LLM...")
+            logger.agent_logger.info("Router", "Regex не сработал. Запрос к LLM...")
         try:
             temp_client = ollama.Client(host="http://127.0.0.1:11434")
             system_prompt = (

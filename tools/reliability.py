@@ -1,6 +1,6 @@
 import time
 import functools
-from logger import agent_logger
+from src.infrastructure import logger
 
 # Типы ошибок
 RECOVERABLE_ERRORS = (BlockingIOError, PermissionError) # PermissionError иногда бывает временным при синхронизации

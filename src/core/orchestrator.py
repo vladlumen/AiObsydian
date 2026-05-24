@@ -7,11 +7,11 @@ from src.infrastructure.vram_scheduler import vram_manager
 from src.infrastructure.telemetry import telemetry
 from src.agents.obsidian_writer import writer
 from src.agents.clerk_agent import clerk
-from src.parsers.url_parser import url_parser
-from src.parsers.pdf_parser import pdf_parser
-from src.parsers.docx_parser import docx_parser
-from src.parsers.video_parser import video_parser
-from src.interfaces.telegram.bot import bot 
+from src.agents.parsers.url_parser import url_parser
+from src.agents.parsers.pdf_parser import pdf_parser
+from src.agents.parsers.docx_parser import docx_parser
+from src.agents.parsers.video_parser import video_parser
+# СТРОКА ИМПОРТА BOT УДАЛЕНА ОТСЮДА, ЧТОБЫ РАЗОРВАТЬ ЦИКЛИЧЕСКИЙ КРУГ
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
 from src.cognitive.memory.semantic import memory
@@ -27,6 +27,14 @@ class Orchestrator:
         bus.subscribe(PhotoReceivedEvent, self._process_photo_pipeline)
         bus.subscribe(DocumentReceivedEvent, self._process_document_pipeline)
         print("[Orchestrator] Поднялся и слушает шину событий.")
+        
+        # Регистрируем внутренний обработчик в менеджере задач
+        task_manager.set_processor(self._process_pipeline_task)
+
+    async def _process_pipeline_task(self, task_data):
+        """Единая точка входа для последовательного воркера."""
+        task_name, coro = task_data
+        await coro
 
     async def handle_text_event(self, event: TextReceivedEvent):
         """Роутер текста: Поиск, Схемы, Сортировка, Видео, Ссылки или Инжест заметки."""
@@ -36,32 +44,32 @@ class Orchestrator:
         if text_lower.startswith("?") or text_lower.endswith("?"):
             if text_lower.startswith("?"):
                 event.text = event.text[1:].strip()
-            await task_manager.put(f"Search_{event.user_id}", self._process_text(event))
-            
+            task_manager.put((f"Search_{event.user_id}", self._process_text(event)))
+        
         elif text_lower.startswith("!схема"):
             event.text = event.text.replace("!схема", "", 1).strip()
-            await task_manager.put(f"Canvas_{event.user_id}", self._generate_canvas(event))
+            task_manager.put((f"Canvas_{event.user_id}", self._generate_canvas(event)))
             
         elif text_lower == "!сортировка":
-            await task_manager.put(f"Clerk_{event.user_id}", self._run_clerk(event))
+            task_manager.put((f"Clerk_{event.user_id}", self._run_clerk(event)))
             
         elif urls:
             target_url = urls[0].lower()
-            # ВРЕЗКА: если ссылка ведет на TikTok или YouTube Shorts
             if "tiktok.com" in target_url or "youtube.com/shorts" in target_url or "youtu.be" in target_url:
-                await task_manager.put(f"Video_{event.user_id}", self._process_video_pipeline(event, urls[0]))
+                task_manager.put((f"Video_{event.user_id}", self._process_video_pipeline(event, urls[0])))
             else:
-                await task_manager.put(f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0]))
+                task_manager.put((f"URL_{event.user_id}", self._process_url_pipeline(event, urls[0])))
             
         else:
-            await task_manager.put(f"Note_{event.user_id}", self._generate_note(event))
+            task_manager.put((f"Note_{event.user_id}", self._generate_note(event)))
 
     async def _process_text(self, event: TextReceivedEvent):
         """Пайплайн: Поиск в векторной памяти -> Формирование промпта -> LLM -> Ответ."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 🔍 Запуск поиска по базе для {event.user_id}")
         await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-        found_context = await memory.search_relevant_context(event.text, top_k=5)
+        found_context = await memory.search(event.text, top_k=5)
         print(f"\n[DEBUG RAG] База нашла следующий контекст:\n{found_context}\n")
         
         if not found_context:
@@ -102,7 +110,7 @@ class Orchestrator:
                         await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
             await bot.send_message(chat_id=event.user_id, text=response_text)
 
-    async def _execute_llm_inference(self, user_id: int, model_name: int, prompt: str, sys_prompt: str) -> str:
+    async def _execute_llm_inference(self, user_id: int, model_name: str, prompt: str, sys_prompt: str) -> str:
         """Инфраструктурный хелпер для безопасного вызова одиночной LLM через планировщик VRAM."""
         async with vram_manager.inference_lock:
             await vram_manager.request_model(model_name)
@@ -113,8 +121,10 @@ class Orchestrator:
                 return ""
             finally:
                 await vram_manager.unload_model(model_name)
+
     async def _run_clerk(self, event: TextReceivedEvent):
         """Запускает сортировщика с замером телеметрии."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print("[Orchestrator] 🧹 Выбран маршрут: Сортировка (Clerk)")
         await bot.send_message(chat_id=event.user_id, text="⏳ Запускаю Clerk Agent. Анализирую Inbox...")
 
@@ -125,13 +135,13 @@ class Orchestrator:
 
     async def _generate_note(self, event: TextReceivedEvent):
         """Пайплайн создания структурированной заметки с поддержкой режима сравнения (Бенчмарк)."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 📂 Запуск генерации заметки Ideaverse для {event.user_id}")
-        found_context = await memory.search_relevant_context(event.text, top_k=3)
+        found_context = await memory.search(event.text, top_k=3)
         old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
         sys_prompt = prompt_loader.get("generate_note_prompt", old_context_block=old_context_block)
         safe_prompt = f"<NEW_DATA>\n{event.text}\n</NEW_DATA>"
 
-        # Карточки моделей для итерации
         models_to_run = config.AVAILABLE_MODELS.items() if config.COMPARE_MODE else [("CURRENT", config.CURRENT_LLM_MODEL)]
 
         for model_alias, model_name in models_to_run:
@@ -143,7 +153,6 @@ class Orchestrator:
             if not raw_response:
                 continue
 
-            # Парсинг структуры Markdown
             title = f"Новая идея ({model_alias.upper()})"
             properties = ""
             content = raw_response
@@ -163,7 +172,6 @@ class Orchestrator:
             content = re.sub(r'PROPERTIES:.*?\n', '', content, flags=re.IGNORECASE).strip()
             content = content.replace("> !abstract", "> [!abstract]")
 
-            # Запись на диск Windows (Obsidian) и регистрация в LanceDB
             async with telemetry.track("Obsidian_File_Write"):
                 file_path = writer.create_note(title=title, content=content, custom_properties=properties, model_name=model_name)
 
@@ -174,8 +182,9 @@ class Orchestrator:
 
     async def _generate_web_note(self, user_id: int, user_comment: str, url: str, extracted_text: str):
         """Пайплайн экстракции фактов из статей и документов с поддержкой Бенчмарка."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 📂 Запуск генерации WEB-заметки для {user_id}")
-        found_context = await memory.search_relevant_context(user_comment + "\n" + extracted_text[:1000], top_k=3)
+        found_context = await memory.search(user_comment + "\n" + extracted_text[:1000], top_k=3)
         old_context_block = f"<OLD_CONTEXT>\n{found_context}\n</OLD_CONTEXT>\n\n" if found_context else ""
         
         sys_prompt = prompt_loader.get(
@@ -230,8 +239,9 @@ class Orchestrator:
 
     async def _process_url_pipeline(self, event: TextReceivedEvent, target_url: str):
         """Пайплайн: Извлечение ссылки -> Парсинг текста -> Пайплайн WEB-заметок."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 🌐 Запуск анализа веб-страницы от {event.user_id}")
-        await bot.send_message(chat_id=event.user_id, text=f"🔗 Изучаю содержимое по ссылке:\n{target_url}...")
+        await bot.send_message(chat_id=event.user_id, text=f"🔗 Ижучаю содержимое по ссылке:\n{target_url}...")
 
         try:
             extracted_text = await asyncio.to_thread(url_parser.extract_text, target_url)
@@ -246,6 +256,7 @@ class Orchestrator:
 
     async def _process_document_pipeline(self, event: DocumentReceivedEvent):
         """Пайплайн: Локальный документ -> Парсинг текста -> WEB-заметка (выжимка фактов)."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 📄 Запуск анализа документа от {event.user_id}")
         await bot.send_message(chat_id=event.user_id, text=f"📄 Изучаю документ: {event.file_name}...")
 
@@ -277,14 +288,15 @@ class Orchestrator:
                 event.file_path.unlink()
                 print(f"[Orchestrator] 🧹 Удален временный документ: {event.file_name}")
 
-    async def handle_voice_event(self, event: VoiceReceivedEvent):
+    def handle_voice_event(self, event: VoiceReceivedEvent):
         task_name = f"Voice_{event.user_id}_{event.audio_path.name}"
-        await task_manager.put(task_name, self._process_voice_pipeline(event))
+        task_manager.put((task_name, self._process_voice_pipeline(event)))
 
     async def _process_voice_pipeline(self, event: VoiceReceivedEvent):
         """Пайплайн: Голос -> STT -> Текст -> Автоматическое построение заметки."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 🎤 Запуск обработки голоса от {event.user_id}")
-        await bot.send_message(chat_id=event.user_id, text="🎧 Перевожу голос в текст...")
+        await bot.send_message(chat_id=event.user_id, text="⏳ Перевожу голос в текст...")
 
         try:
             recognized_text = await asyncio.to_thread(stt.transcribe, event.audio_path)
@@ -303,6 +315,7 @@ class Orchestrator:
 
     async def _process_photo_pipeline(self, event: PhotoReceivedEvent):
         """Пайплайн: Фото -> Llama Vision -> Текст -> Смешивание контекста -> Пайплайн заметок."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 👁️ Запуск анализа фото от {event.user_id}")
         await bot.send_message(chat_id=event.user_id, text="👀 Изучаю изображение...")
 
@@ -345,17 +358,16 @@ class Orchestrator:
 
     async def _process_video_pipeline(self, event: TextReceivedEvent, target_url: str):
         """Пайплайн: Ссылка на видео -> Вытягивание аудио -> STT -> Создание заметки."""
+        from src.interfaces.telegram.bot import bot # Локальный импорт
         print(f"[Orchestrator] 🎬 Запуск анализа медиа-ссылки от {event.user_id}")
         await bot.send_message(chat_id=event.user_id, text="🎬 Обнаружил ссылку на видео. Выкачиваю аудиодорожку...")
 
         try:
-            # 1. Скачиваем аудиодорожку через yt-dlp
             audio_path = await video_parser.extract_audio(target_url)
             await bot.send_message(chat_id=event.user_id, text="📥 Звук извлечен. Расшифровываю речь через Whisper...")
 
-            print(f"[Orchestrator] 🎙️ Аудиодорожка скачана в {audio_path}. Передаю в STT...")
+            print(f"[Orchestrator] 🎙️ Аудиодорожка скачана in {audio_path}. Передаю в STT...")
 
-            # 2. Переводим звук в текст через твой STT
             recognized_text = await asyncio.to_thread(stt.transcribe, audio_path)
             print(f"[Orchestrator] 🗣️ Видео распознано: {recognized_text}")
 
@@ -365,7 +377,6 @@ class Orchestrator:
 
             await bot.send_message(chat_id=event.user_id, text=f"🗣️ *Текст из видео расшифрован!*\nФормирую структурированную заметку...")
 
-            # 3. Передаем текст в пайплайн создания заметок
             final_text = f"Контекст: Выжимка видео по ссылке {target_url}.\n\nТекст из видео:\n{recognized_text}"
             text_event = TextReceivedEvent(user_id=event.user_id, text=final_text)
             await self._generate_note(text_event)
@@ -374,7 +385,6 @@ class Orchestrator:
             print(f"[Orchestrator] ❌ Ошибка Video Pipeline: {repr(e)}")
             await bot.send_message(chat_id=event.user_id, text=f"❌ Не удалось обработать видео: {repr(e)}")
         finally:
-            # 4. Чистим за собой временный .mp3 файл
             if 'audio_path' in locals() and audio_path.exists():
                 audio_path.unlink()
                 print(f"[Orchestrator] 🧹 Удален временный аудиофайл видео: {audio_path.name}")

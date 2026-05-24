@@ -1,4 +1,4 @@
-# Архитектура и Структура Проекта (v2.0)
+# Архитектура и Структура Проекта (v2.2)
 
 **Правила Хранения Данных:**
 - ВЕСЬ код, базы данных (LanceDB, SQLite) и временные медиа (аудио, фото из TG) живут в Linux `/home/vladislav/projects/agent_project/`.
@@ -6,61 +6,59 @@
 
 ## Дерево файлов
 /home/vladislav/projects/agent_project/
-├── 📄 Start_AI.bat             # (На Windows) Запускает WSL и вызывает run.sh
 ├── 📄 run.sh                   # (В Linux) Убивает зомби-процессы, линкует драйверы CUDA, запускает ядро
-├── 📄 test_run.py              # Точка входа в приложение
-├── 📄 requirements.txt
-├── 📄 .env 
-├── 📄 bot.py                   # Основной файл бота (aiogram)
-├── 📄 brain.py                 # Основной модуль ИИ (планируется?)
-├── 📄 clerk.py                 # Агент сортировщика (планируется?)
-├── 📄 config.py                # Токены, пути (BASE_DIR, VAULT_DIR), константы (дублирует src/core/config.py?)
-├── 📄 db_init.py               # Инициализация базы данных
-├── 📄 logger.py                # Настройка логирования
+├── 📄 test_run.py              # Точка входа в приложение / тестовый прогон
+├── 📄 run_auto_tests.py        # Автоматические интеграционные тесты
 ├── 📄 run_sync.py              # Запуск синхронизации Obsidian
 ├── 📄 start_agent.sh           # Скрипт запуска агента
-├── 📄 state.db                 # База данных SQLite для стейтов
 ├── 📄 test_memory.py           # Тесты памяти
-├── 📁 tools/                   # Вспомогательные скрипты
-├── 📁 docs/
-│   ├── 📄 AI_CONTEXT.md           # Контекст для LLM
-│   ├── 📄 ARCHITECTURE.md         # Структура (этот файл)
-│   └── 📄 ROADMAP.md              # План разработки
-├── 📁 src/
-│   ├── 📁 agents/                 # Агенты (поведение)
-│   │   ├── 📄 clerk_agent.py       # Сортировщик 00_Inbox
-│   │   ├── 📄 obsidian_writer.py   # Очистка имен файлов и атомарная запись в базу (Windows)
-│   │   └── 📁 parsers/             # Извлекатели текста
-│   │       ├── 📄 url_parser.py    # Веб-страницы
-│   │       ├── 📄 pdf_parser.py    # PDF-файлы
-│   │       └── 📄 docx_parser.py   # DOCX-файлы
-│   ├── 📁 cognitive/              # LEVEL 2: AI-навыки (Stateless Services)
-│   │   ├── 📁 memory/           # Модуль памяти
-│   │   │   ├── 📄 conversation.py  # Краткосрочная память (планируется)
-│   │   │   └── 📄 semantic.py      # Долгосрочная память (LanceDB) — активно используется
-│   │   ├── 📄 llm_service.py       # Генерация текста (Ollama)
-│   │   ├── 📄 vision_service.py    # Анализ изображений (Ollama Vision) — планируется
-│   │   └── 📄 stt_service.py       # Транскрибация (Faster-Whisper) — активно используется
-│   ├── 📁 core/                   # Управляющий узел (Главный дирижер)
-│   │   ├── 📄 orchestrator.py      # 🔴 ТОЛЬКО ОН вызывает сервисы. Каскадная обработка пайплайнов.
-│   │   └── 📄 config.py            # Токены, пути (BASE_DIR, VAULT_DIR), константы
-│   │
-│   ├── 📁 infrastructure/       # LEVEL 1: Железо и Транспорт
-│   │   ├── 📄 event_bus.py         # Шина и Typed Events (@dataclass)
-│   │   ├── 📄 task_queue.py        # Асинхронная очередь задач
-│   │   ├── 📄 vram_scheduler.py    # Планировщик VRAM и Семафор (asyncio.Semaphore(1))
-│   │   └── 📄 telemetry.py         # Observability (Тайминги, загрузка VRAM, декораторы)
-│   │
-│   ├── 📁 models/               # Управление "мозгами"
-│   │   ├── 📄 registry.py          # MODEL_REGISTRY (vram_required для hermes, whisper, llama-vision)
-│   │   └── 📄 loaders.py           # Физическая загрузка весов в GPU
-│   │
-│   ├── 📁 interfaces/           # Внешний мир
-│   │   └── 📁 telegram/
-│   │       ├── 📄 bot.py           # Aiogram setup
-│   │       └── 📄 handlers.py      # Ловит text/voice/photo -> публикует в EventBus
-│   │
-│   └── 📁 storage/              # Физическая работа с диском
-│       ├── 📄 vector_store.py      # LanceDB wrapper (активно используется)
-│       └── 📄 sqlite_manager.py    # Сохранение стейтов (планируется)
-└── 📁 data/                     # Временные файлы и БД (Игнорируется Git)
+├── 📄 requirements.txt
+├── 📄 .env 
+├── 📄 state.db                 # База данных SQLite для стейтов (локально)
+├── 📁 _old_drafts/             # Черновики и архивные модули (brain.py)
+├── 📁 data/                    # Временные файлы и БД (Игнорируется Git)
+│   ├── 📁 lancedb_store/       # Хранилище векторной базы LanceDB
+│   └── 📁 temp_media/          # Загруженные фото и аудио из TG
+├── 📁 tools/                   # Вспомогательные скрипты автоматизации
+├── 📁 tests/                   # Тесты и фикстуры
+├── 📁 docs/                    # Документация проекта
+└── 📁 src/                     # Исходный код (Clean Architecture)
+    ├── 📁 agents/                 # Агенты (Поведение)
+    │   ├── 📄 clerk_agent.py       # Сортировщик входящих заметок
+    │   ├── 📄 obsidian_writer.py   # Запись атомарных заметок в Obsidian
+    │   └── 📁 parsers/             # Извлекатели текста из медиафайлов
+    │       ├── 📄 document_parser.py
+    │       ├── 📄 docx_parser.py
+    │       ├── 📄 pdf_parser.py
+    │       ├── 📄 url_parser.py    
+    │       └── 📄 video_parser.py  
+    ├── 📁 cognitive/              # AI-навыки (Stateless Services)
+    │   ├── 📄 llm_service.py       # Текст (Ollama)
+    │   ├── 📄 stt_service.py       # Аудио в текст (Faster-Whisper)
+    │   ├── 📄 vision_service.py    # Зрение (Ollama Vision)
+    │   └── 📁 memory/              # Модуль памяти агента
+    │       ├── 📄 conversation.py  # Краткосрочный контекст
+    │       └── 📄 semantic.py      # Долгосрочная семантическая память
+    ├── 📁 core/                   # Управляющий узел (Оркестрация)
+    │   ├── 📄 orchestrator.py      # Главный дирижер пайплайнов
+    │   ├── 📄 config.py            # Единый конфиг проекта (Токены, пути)
+    │   ├── 📄 prompt_loader.py     # Загрузчик системных промптов
+    │   └── 📄 prompts.yaml         # Промпты для LLM
+    ├── 📁 infrastructure/         # Низкоуровневые системные сервисы
+    │   ├── 📄 event_bus.py         # Асинхронная шина событий
+    │   ├── 📄 logger.py            # Централизованное логирование
+    │   ├── 📄 task_queue.py        # Очередь задач
+    │   ├── 📄 telemetry.py         # Метрики (Загрузка VRAM, тайминги)
+    │   └── 📄 vram_scheduler.py    # Распределитель видеопамяти для моделей
+    ├── 📁 interfaces/             # Внешние интерфейсы ввода-вывода
+    │   └── 📁 telegram/
+    │       ├── 📄 bot.py           # Инициализация Aiogram
+    │       ├── 📄 handlers.py      # Обработчики сообщений (В шину событий)
+    │       └── 📄 keyboards.py     # Инлайн-меню
+    ├── 📁 models/                 # Управление ИИ-моделями
+    │   ├── 📄 registry.py          # Реестр требований к памяти
+    │   └── 📄 loaders.py           # Загрузка/выгрузка весов в GPU
+    └── 📁 storage/                # Работа с физическими базами данных
+        ├── 📄 db_init.py           # Первичная инициализация таблиц
+        ├── 📄 sqlite_manager.py    # Менеджер состояний процессов
+        └── 📄 vector_store.py      # Коннектор к LanceDB

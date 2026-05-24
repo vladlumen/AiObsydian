@@ -39,7 +39,12 @@ class LLMService:
         try:
             response = await self.client.chat(
                 model=model_to_use,
-                messages=messages
+                messages=messages,
+                options={
+                    "temperature": 0.3,
+                    # Если Оллама поддерживает прямой флаг для новых Qwen:
+                    "thinking_budget": 0  # Срезает скрытые рассуждения в ноль
+                }
             )
             return response['message']['content'].strip()
         except Exception as e:
@@ -72,7 +77,8 @@ class LLMService:
             "options": {
                 "num_ctx": 2048,
                 "num_predict": 512,
-                "temperature": 0.2,
+                "temperature": 0.3,
+                "thinking_budget": 0,  # Срезает скрытые рассуждения в ноль
                 "flash_attention": True
             }
         }

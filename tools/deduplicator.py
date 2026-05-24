@@ -1,6 +1,6 @@
 import os
 from tools.vector_storage import vector_mem
-from logger import agent_logger
+from src.infrastructure import logger
 
 class Deduplicator:
     THRESHOLD = 0.8  # Порог семантической схожести

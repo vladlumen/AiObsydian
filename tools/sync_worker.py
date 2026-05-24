@@ -3,7 +3,7 @@ import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from tools.vector_storage import vector_mem
-from logger import agent_logger
+from src.infrastructure import logger
 
 class NotesHandler(FileSystemEventHandler):
     def on_modified(self, event):

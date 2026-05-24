@@ -1,39 +1,49 @@
 import asyncio
-from typing import Coroutine, Any
+from typing import Any, Callable, Coroutine
 
 class TaskQueue:
-    def __init__(self, concurrency: int = 1):
-        # queue хранит сами задачи
-        self.queue: asyncio.Queue = asyncio.Queue()
-        # concurrency - сколько задач мы разрешаем делать одновременно (нам нужна 1)
-        self.concurrency = concurrency
-        self.workers: list[asyncio.Task] = []
+    def __init__(self):
+        # Классическая асинхронная очередь
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._worker_task: asyncio.Task | None = None
+        self._processor: Callable[[Any], Coroutine] | None = None
 
-    async def start(self):
-        """Запускает фоновых рабочих (воркеров), которые будут разгребать очередь."""
-        for i in range(self.concurrency):
-            worker = asyncio.create_task(self._worker(i))
-            self.workers.append(worker)
-        print(f"[TaskQueue] Запущено {self.concurrency} воркеров. Очередь готова к приему.")
+    def set_processor(self, processor_func: Callable[[Any], Coroutine]):
+        """Регистрируем оркестратор как главный обработчик тасков."""
+        self._processor = processor_func
 
-    async def put(self, task_name: str, coro: Coroutine[Any, Any, Any]):
-        """Кладет новую задачу в конец очереди."""
-        await self.queue.put((task_name, coro))
-        print(f"[TaskQueue] 📥 '{task_name}' добавлена в очередь. (Всего ждет: {self.queue.qsize()})")
+    def put(self, task_data: Any):
+        """Инжект задачи из EventBus (не блокирует поток)."""
+        self._queue.put_nowait(task_data)
+        print(f"[TaskQueue] 📥 Задача добавлена в очередь. (Всего в очереди: {self._queue.qsize()})")
 
-    async def _worker(self, worker_id: int):
-        """Фоновый процесс, который бесконечно берет задачи и выполняет их."""
+    async def start_workers(self):
+        """Запуск ОДНОГО воркера. Строго последовательный разбор."""
+        print("[TaskQueue] ⏳ Запущено 1 воркеров. Очередь переведена в последовательный режим.")
+        
         while True:
-            task_name, coro = await self.queue.get()
-            print(f"\n[Worker-{worker_id}] ⚙️ Взял в работу: {task_name}")
+            # Блокирующее ожидание новой задачи из очереди
+            task = await self._queue.get()
+            
             try:
-                await coro  # Выполняем саму задачу
+                if self._processor:
+                    # КРИТИЧЕСКИЙ МЕНЕДЖМЕНТ: Жесткий await. 
+                    # Следующая задача не начнется, пока оркестратор полностью не запишет MD-файл
+                    await self._processor(task)
+                else:
+                    print("[TaskQueue] ⚠️ Ошибка: Обработчик задач не зарегистрирован!")
             except Exception as e:
-                print(f"[Worker-{worker_id}] ❌ Ошибка в {task_name}: {e}")
+                print(f"[TaskQueue] ❌ Критическая ошибка при обработке таска: {e}")
             finally:
-                # Сообщаем очереди, что задача завершена
-                self.queue.task_done()
-                print(f"[Worker-{worker_id}] ✅ Завершил: {task_name}")
+                # Фиксируем закрытие таска для метода join()
+                self._queue.task_done()
 
-# Создаем глобальную очередь с 1 воркером (строгая последовательность)
-task_manager = TaskQueue(concurrency=1)
+    async def wait_until_empty(self):
+        """Блокирует выполнение (используется в автотестах), пока очередь не опустеет."""
+        print("[TaskQueue] ⏳ Синхронизация очереди: ожидание завершения всех процессов...")
+        await self._queue.join()
+        print("[TaskQueue] 🎉 Все задачи из очереди успешно обработаны.")
+
+
+# Глобальный экземпляр для использования в других модулях
+task_manager = TaskQueue()
