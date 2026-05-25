@@ -18,11 +18,19 @@ class PromptLoader:
             print(f"[PromptLoader] ❌ Ошибка загрузки промптов: {e}")
 
     def get(self, key: str, **kwargs) -> str:
-        """Возвращает отформатированный промпт по ключу."""
+        """Возвращает отформатированный промпт без использования опасного .format()."""
         template = self._prompts.get(key, "")
         if not template:
             print(f"[PromptLoader] ⚠️ Промпт для ключа '{key}' не найден.")
             return ""
-        return template.format(**kwargs)
+        
+        # Безопасная замена переменных по словарю kwargs
+        # Заменяет строго '{переменная}', не ломая одиночные или квадратные скобки Obsidian
+        result = template
+        for k, v in kwargs.items():
+            target_placeholder = "{" + str(k) + "}"
+            result = result.replace(target_placeholder, str(v))
+            
+        return result
 
 prompt_loader = PromptLoader()

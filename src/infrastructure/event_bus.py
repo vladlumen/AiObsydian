@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Any
 from pathlib import Path
@@ -52,12 +53,21 @@ class EventBus:
         print(f"[EventBus] Подписан обработчик {handler.__name__} на {event_type.__name__}")
 
     async def publish(self, event: Any):
-        """Публикация события. Все подписчики запускаются асинхронно."""
+        """Публикация события. Подписчики-корутины запускаются асинхронно."""
         event_type = type(event)
         if event_type in self._subscribers:
             print(f"[EventBus] Улетело событие: {event_type.__name__}")
-            # Запускаем все обработчики параллельно
-            tasks = [handler(event) for handler in self._subscribers[event_type]]
+            
+            tasks = []
+            for handler in self._subscribers[event_type]:
+                res = handler(event)
+                # Fail-safe проверка: добавляем в gather только то, что можно завеймить
+                if inspect.iscoroutine(res) or inspect.isawaitable(res):
+                    tasks.append(res)
+                else:
+                    # Если функция была синхронной, она уже выполнилась, аварии нет
+                    print(f"[EventBus] ⚠️ Обработчик {handler.__name__} выполнился синхронно.")
+                    
             if tasks:
                 await asyncio.gather(*tasks)
         else:

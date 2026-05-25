@@ -1,18 +1,17 @@
 import base64
 import httpx
 from io import BytesIO
+from pathlib import Path
 from PIL import Image
 from ollama import AsyncClient
-from src.core import config
 
 class LLMService:
     def __init__(self, default_model: str = "hermes3:8b"):
         self.default_model = default_model
         self.client = AsyncClient()
-        self.base_url = "http://localhost:11434" # Стандартный адрес Ollama
+        self.base_url = "http://localhost:11434"
 
     async def is_alive(self) -> bool:
-        """Проверяет, запущена ли Ollama (быстрый пинг)."""
         try:
             async with httpx.AsyncClient() as http_client:
                 response = await http_client.get(self.base_url, timeout=1.0)
@@ -21,47 +20,56 @@ class LLMService:
             return False
 
     async def generate_text(self, user_text: str, system_prompt: str = "", model: str = None) -> str:
-        """Отправляет запрос в локальную Ollama."""
-        # 1. Сначала проверяем пульс
+        """Отправляет запрос через плоский API /api/generate для жесткого отключения CoT."""
         if not await self.is_alive():
             print("[LLMService] ❌ Ollama не отвечает!")
-            return "⚠️ Система: Сервер Ollama отключен. Пожалуйста, запустите его."
+            return "⚠️ Система: Сервер Ollama отключен."
 
-        # 2. Если жива - формируем промпт
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-          
-        messages.append({"role": "user", "content": user_text})
-
-        # Используем переданную модель или модель по умолчанию
         model_to_use = model or self.default_model
+        
+        # Склеиваем системный промпт и пользовательские данные в один монолитный контекст
+        full_prompt = ""
+        if system_prompt:
+            full_prompt += f"Системная инструкция:\n{system_prompt.strip()}\n\n"
+        full_prompt += f"Входящие данные:\n{user_text.strip()}\n\nОтвет:"
+
+        payload = {
+            "model": model_to_use,
+            "prompt": full_prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_gpu": 99,
+                "low_vram": False,
+                "num_ctx": 4096,
+                "num_predict": 1024
+            }
+        }
 
         try:
-            response = await self.client.chat(
-                model=model_to_use,
-                messages=messages,
-                think=False,  # Отключаем режим размышлений (CoT) для моделей, которые это поддерживают
-                options={
-                    "temperature": 0.3,
-                    # Контроль скрытых рассуждений из конфигурации (оставляем для совместимости)
-                    "thinking_budget": config.THINKING_BUDGET
-                }
-            )
-            return response['message']['content'].strip()
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.post(
+                    f"{self.base_url}/api/generate", 
+                    json=payload, 
+                    timeout=60.0
+                )
+                response.raise_for_status()
+                result_json = response.json()
+                
+                # Извлекаем плоский ответ из эндпоинта generate
+                output_text = result_json.get("response", "").strip()
+                return output_text
+                
         except Exception as e:
-            print(f"[LLMService] ❌ Ошибка генерации: {e}")
-            return "Произошла ошибка при генерации ответа."
+            print(f"[LLMService] ❌ Ошибка генерации текста через /api/generate: {e}")
+            return ""
 
-    async def analyze_image(self, image_path: Path, prompt: str, system_prompt: str = "", model_name: str = "llava") -> str:
-        """Сжимает фото, кодирует в base64 и отправляет в Vision модель."""
+    async def analyze_image(self, image_path: Path, prompt: str, system_prompt: str = "", model_name: str = "llama3.2-vision") -> str:
         print(f"[LLMService] 👁️ Подготовка изображения {image_path.name}...")
         
-        # Оптимизация изображения: сжимаем до 800px по большей стороне
         with Image.open(image_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            
             img.thumbnail((800, 800), Image.Resampling.LANCZOS)
             
             buffer = BytesIO()
@@ -72,35 +80,28 @@ class LLMService:
 
         payload = {
             "model": model_name,
-            "prompt": prompt,
-            "system": system_prompt,
+            "prompt": f"{system_prompt}\n\nЗапрос: {prompt}" if system_prompt else prompt,
             "images": [base64_image],
             "stream": False,
-            "think": False,  # Отключаем режим размышлений (CoT) для моделей, которые это поддерживают
             "options": {
                 "num_ctx": 2048,
                 "num_predict": 512,
-                "temperature": 0.3,
-                "thinking_budget": config.THINKING_BUDGET,  # Контроль скрытых рассуждений
-                "flash_attention": True
+                "temperature": 0.0,
+                "num_gpu": 99
             }
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{self.base_url}/api/generate", json=payload, timeout=300.0)
-            response.raise_for_status()
-            return response.json().get("response", "").strip()
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{self.base_url}/api/generate", json=payload, timeout=120.0)
+                response.raise_for_status()
+                return response.json().get("response", "").strip()
+        except Exception as e:
+            print(f"[LLMService] ❌ Ошибка Vision API: {e}")
+            return ""
 
     async def get_embedding(self, text: str, model_name: str = "nomic-embed-text") -> list[float]:
-        """Получает векторное представление (эмбеддинг) текста от Ollama."""
-        # Для nomic-embed-text рекомендуется добавлять префикс для документов и запросов,
-        # но пока для простоты шлем как есть.
-        payload = {
-            "model": model_name,
-            "prompt": text
-        }
-        
-        # Эмбеддинги считаются быстро, таймаут можно сделать небольшим
+        payload = {"model": model_name, "prompt": text}
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{self.base_url}/api/embeddings", json=payload, timeout=30.0)
             response.raise_for_status()
