@@ -52,7 +52,7 @@ async def main():
     # 1. Запускаем воркера очереди в ФОНЕ (через asyncio.create_task), 
     # чтобы код пошел дальше к запуску бота
     print("[System] ⚙️ Запуск фоновых воркеров очереди задач...")
-    worker_task = asyncio.create_task(task_manager.start_workers())
+    worker_task = asyncio.create_task(task_manager.start())
     
     # 2. Запускаем Telegram-бота (блокирующий вызов, держит скрипт запущенным)
     await start_telegram_bot()
