@@ -1,6 +1,8 @@
 import asyncio
 import re
 import inspect
+import os
+from pathlib import Path
 from src.infrastructure.event_bus import bus, VoiceReceivedEvent, TextReceivedEvent, PhotoReceivedEvent, DocumentReceivedEvent
 from src.infrastructure.task_queue import task_manager
 from src.infrastructure.vram_scheduler import vram_manager
@@ -13,9 +15,11 @@ from src.agents.parsers.docx_parser import docx_parser
 from src.agents.parsers.video_parser import video_parser
 from src.cognitive.llm_service import llm
 from src.cognitive.stt_service import stt
+from src.cognitive.vision_service import vision_service
 from src.cognitive.memory.semantic import memory
 from src.core.prompt_loader import prompt_loader
 from src.core import config
+from src.infrastructure.logger import logger
 
 URL_REGEX = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)+')
 
@@ -43,35 +47,114 @@ class Orchestrator:
         if text_lower.startswith("?") or text_lower.endswith("?"):
             if text_lower.startswith("?"):
                 event.text = event.text[1:].strip()
-            task_manager.put((f"Search_{event.user_id}", lambda: self._process_text(event)))
+            task_manager.add_task(self._process_text, event)
         elif text_lower.startswith("!схема"):
             event.text = event.text.replace("!схема", "", 1).strip()
-            task_manager.put((f"Canvas_{event.user_id}", lambda: self._generate_canvas(event)))
+            task_manager.add_task(self._generate_canvas, event)
         elif text_lower == "!сортировка":
-            task_manager.put((f"Clerk_{event.user_id}", lambda: self._run_clerk(event)))
+            task_manager.add_task(self._run_clerk, event)
         elif urls:
             target_url = urls[0].lower()
             if "tiktok.com" in target_url or "youtube.com/shorts" in target_url or "youtu.be" in target_url:
-                task_manager.put((f"Video_{event.user_id}", lambda: self._process_video_pipeline(event, urls[0])))
+                task_manager.add_task(self._process_video_pipeline, event, urls[0])
             else:
-                task_manager.put((f"URL_{event.user_id}", lambda: self._process_url_pipeline(event, urls[0])))
+                task_manager.add_task(self._process_url_pipeline, event, urls[0])
         else:
-            task_manager.put((f"Note_{event.user_id}", lambda: self._generate_note(event)))
+            task_manager.add_task(self._generate_note, event)
 
     async def handle_photo_event(self, event: PhotoReceivedEvent):
-        """Ставит обработку фото в очередь (Защита VRAM)."""
-        task_name = f"Photo_{event.user_id}_{event.photo_path.name}"
-        task_manager.put((task_name, lambda: self._process_photo_pipeline(event)))
-
-    async def handle_document_event(self, event: DocumentReceivedEvent):
-        """Ставит обработку документа в очередь (Защита VRAM)."""
-        task_name = f"Doc_{event.user_id}_{event.file_name}"
-        task_manager.put((task_name, lambda: self._process_document_pipeline(event)))
+        """Пайплайн обработки изображений с автоматической зачисткой."""
+        print(f"[Orchestrator] 👁️ Запуск анализа фото от {event.user_id}")
+        
+        # Строгое соответствие датаклассу из EventBus
+        image_path = Path(event.photo_path)
+        
+        try:
+            ocr_text = await vision_service.analyze_image(
+                image_path=image_path,
+                prompt="Распознай текст со скриншота задач"
+            )
+            
+            if ocr_text.strip():
+                enriched_text = f"Контекст: Фотография.\nЧто увидел AI:\n{ocr_text}"
+                # Меняем event_bus.publish на bus.publish (согласно твоему импорту)
+                from src.infrastructure.event_bus import bus, TextReceivedEvent
+                await bus.publish(TextReceivedEvent(user_id=event.user_id, text=enriched_text))
+                
+        except Exception as e:
+            print(f"[Orchestrator ❌ Ошибка пайплайна фото]: {repr(e)}")
+            
+        finally:
+            if image_path.exists():
+                try:
+                    os.remove(image_path)
+                    print(f"[Orchestrator] 🧹 Удален временный файл изображения: {image_path.name}")
+                except Exception as clear_e:
+                    print(f"⚠️ Не удалось удалить файл {image_path.name}: {clear_e}")
 
     async def handle_voice_event(self, event: VoiceReceivedEvent):
-        """Ставит обработку голоса в очередь (Защита VRAM)."""
-        task_name = f"Voice_{event.user_id}_{event.audio_path.name}"
-        task_manager.put((task_name, lambda: self._process_voice_pipeline(event)))
+        """Пайплайн обработки голосовых сообщений с автоматической зачисткой."""
+        print(f"[Orchestrator] 🎤 Запуск обработки голоса от {event.user_id}")
+        
+        # Импортируем именно 'stt', как прописано в твоем сервисе
+        from src.cognitive.stt_service import stt
+        
+        audio_path = Path(event.audio_path)
+        
+        try:
+            # Вызываем метод у правильного объекта (синхронный вызов)
+            transcribed_text = stt.transcribe(audio_path)
+            
+            if transcribed_text.strip():
+                from src.infrastructure.event_bus import bus, TextReceivedEvent
+                await bus.publish(TextReceivedEvent(user_id=event.user_id, text=transcribed_text))
+                
+        except Exception as e:
+            print(f"[Orchestrator ❌ Ошибка пайплайна голоса]: {repr(e)}")
+            
+        finally:
+            if audio_path.exists():
+                try:
+                    os.remove(audio_path)
+                    print(f"[Orchestrator] 🧹 Удален временный аудиофайл: {audio_path.name}")
+                except Exception as clear_e:
+                    print(f"⚠️ Не удалось удалить файл {audio_path.name}: {clear_e}")
+
+    async def handle_document_event(self, event: DocumentReceivedEvent):
+        """Пайплайн обработки документов (PDF/Docx) с извлечением текста и авто-зачисткой."""
+        print(f"[Orchestrator] 📄 Запуск парсинга документа от {event.user_id}")
+        
+        # Строго берем file_path из датакласса DocumentReceivedEvent
+        file_path = Path(event.file_path)
+        
+        try:
+            # Ленивый импорт диспетчера парсеров для защиты от циклов
+            from src.agents.parsers.document_parser import document_parser
+            
+            # Извлекаем чистый текст из PDF или DOCX
+            extracted_text = await document_parser.extract_text(file_path)
+            
+            if extracted_text and extracted_text.strip():
+                print(f"[Orchestrator] ✅ Текст успешно извлечен ({len(extracted_text)} симв.). Отправляю в Hermes 3...")
+                enriched_text = f"Контекст: Документ {event.file_name}.\nСодержимое:\n{extracted_text}"
+                
+                # Публикуем текстовое событие для генерации итоговой заметки в Obsidian
+                from src.infrastructure.event_bus import bus, TextReceivedEvent
+                await bus.publish(TextReceivedEvent(user_id=event.user_id, text=enriched_text))
+            else:
+                print(f"[Orchestrator] ⚠️ Из файла {event.file_name} не удалось извлечь текст.")
+                
+        except Exception as e:
+            print(f"[Orchestrator ❌ Ошибка пайплайна документов]: {repr(e)}")
+            
+        finally:
+            # Гарантированная зачистка бинарника с диска WSL2 (Шаг 2 нашего плана)
+            if file_path.exists():
+                try:
+                    os.remove(file_path)
+                    print(f"[Orchestrator] 🧹 Удален временный документ: {file_path.name}")
+                except Exception as clear_e:
+                    print(f"⚠️ Не удалось удалить файл {file_path.name}: {clear_e}")
 
     async def _process_text(self, event: TextReceivedEvent):
         from src.interfaces.telegram.bot import bot

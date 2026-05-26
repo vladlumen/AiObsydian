@@ -14,4 +14,4 @@ data/
 
 # Logs
 *.log
-monitoring/
+monitoring/state.db

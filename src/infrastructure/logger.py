@@ -1,8 +1,22 @@
+import logging
+import sys
 import sqlite3
 import json
-import sys
 from datetime import datetime
 
+# 1. Настраиваем базовый формат вывода (стандартный Python логгер)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# 2. СОЗДАЕМ ЕДИНЫЙ ОБЪЕКТ ЛОГГЕРА, КОТОРЫЙ ИЩУТ ОРКЕСТРАТОР И ДРУГИЕ МОДУЛИ
+logger = logging.getLogger("AgentCore")
+
+# Сохраняем существующую функциональность LiteFlightRecorder для обратной совместимости
 DB_NAME = "state.db"
 
 class LiteFlightRecorder:

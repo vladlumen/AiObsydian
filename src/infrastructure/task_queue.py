@@ -1,66 +1,90 @@
 import asyncio
-from typing import Any, Callable, Coroutine
+import os
+import shutil
+import logging
+from pathlib import Path
+from typing import Callable, Any, Coroutine, Optional
+
+logger = logging.getLogger("TaskQueue")
 
 class TaskQueue:
     def __init__(self):
-        # Классическая асинхронная очередь
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._worker_task: asyncio.Task | None = None
-        self._processor: Callable[[Any], Coroutine] | None = None
-        self.is_processing: bool = False
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.is_running = False
+        self.worker_task: Optional[asyncio.Task] = None
+        self.processor: Optional[Callable[..., Coroutine[Any, Any, Any]]] = None
+        self.temp_media_dir = Path(__file__).parent.parent.parent / "data" / "temp_media"
 
-    def set_processor(self, processor_func: Callable[[Any], Coroutine]):
-        """Регистрируем оркестратор как главный обработчик тасков."""
-        self._processor = processor_func
+    def set_processor(self, processor_func: Callable[..., Coroutine[Any, Any, Any]]):
+        """Устанавливает главный процессор для обработки задач из очереди."""
+        self.processor = processor_func
+        print("[TaskQueue] 🎯 Процессор задач успешно привязан к Оркестратору.")
 
-    def put(self, task_data: Any):
-        """Инжект задачи из EventBus (не блокирует поток).
-        
-        task_data: tuple(task_name, coro_factory) where coro_factory is either:
-          - a coroutine object (legacy, executes immediately at put time - DANGEROUS)
-          - a callable that returns a coroutine (recommended, executes at worker time)
-          - a tuple (callable, args_tuple) for deferred execution
-        """
-        self._queue.put_nowait(task_data)
-        print(f"[TaskQueue] 📥 Задача добавлена в очередь. (Всего в очереди: {self._queue.qsize()})")
+    def clear_temp_media(self):
+        """Очищает папку temp_media от остаточных бинарных файлов."""
+        try:
+            if not self.temp_media_dir.exists():
+                self.temp_media_dir.mkdir(parents=True, exist_ok=True)
+                return
 
-    async def start_workers(self):
-        """Запуск ОДНОГО воркера. Строго последовательный разбор."""
-        print("[TaskQueue] ⏳ Запущено 1 воркеров. Очередь переведена в последовательный режим.")
-        
-        while True:
-            # Блокирующее ожидание новой задачи из очереди
-            task = await self._queue.get()
-            self.is_processing = True
-            
+            extensions = ('.ogg', '.mp3', '.wav', '.jpg', '.jpeg', '.png', '.pdf', '.docx')
+            deleted_count = 0
+
+            for item in self.temp_media_dir.iterdir():
+                if item.is_file() and item.suffix.lower() in extensions:
+                    os.remove(item)
+                    deleted_count += 1
+
+            if deleted_count > 0:
+                print(f"[TaskQueue] 🧹 Авто-очистка: удалено {deleted_count} временных медиа-файлов.")
+        except Exception as e:
+            print(f"[TaskQueue ⚠️ Ошибка очистки мусора]: {e}")
+
+    def add_task(self, task_func: Callable[..., Coroutine[Any, Any, Any]], *args, **kwargs):
+        """Добавляет асинхронную задачу в очередь."""
+        self.queue.put_nowait((task_func, args, kwargs))
+        print(f"[TaskQueue] 📥 Задача добавлена в очередь. (Всего в очереди: {self.queue.qsize()})")
+
+    async def start(self):
+        """Запускает фоновый последовательный воркер."""
+        if self.is_running:
+            return
+        self.is_running = True
+        self.worker_task = asyncio.create_task(self._worker_loop())
+        print("[TaskQueue] 🟢 Фоновый воркер успешно запущен в последовательном режиме.")
+
+    async def stop(self):
+        """Останавливает воркер очереди."""
+        self.is_running = False
+        if self.worker_task:
+            self.worker_task.cancel()
             try:
-                if self._processor:
-                    # КРИТИЧЕСКИЙ МЕНЕДЖМЕНТ: Жесткий await. 
-                    # Следующая задача не начнется, пока оркестратор полностью не запишет MD-файл
-                    await self._processor(task)
-                else:
-                    print("[TaskQueue] ⚠️ Ошибка: Обработчик задач не зарегистрирован!")
+                await self.worker_task
+            except asyncio.CancelledError:
+                pass
+        print("[TaskQueue] 🛑 Фоновый воркер остановлен.")
+
+    async def _worker_loop(self):
+        """Бесконечный цикл последовательного выполнения задач."""
+        while self.is_running:
+            try:
+                # Ожидаем задачу из очереди
+                task_func, args, kwargs = await self.queue.get()
+                
+                # Запускаем выполнение задачи
+                await task_func(*args, **kwargs)
+                
+                # Фиксируем выполнение в asyncio.Queue
+                self.queue.task_done()
+                
+                # СТРОГО ПОСЛЕ выполнения задачи вызываем очистку папки temp_media
+                self.clear_temp_media()
+
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                print(f"[TaskQueue] ❌ Критическая ошибка при обработке таска: {e}")
-            finally:
-                # Фиксируем закрытие таска для метода join()
-                self.is_processing = False
-                self._queue.task_done()
+                print(f"[TaskQueue ❌ Критическая ошибка воркера]: {e}")
+                self.clear_temp_media()
+                await asyncio.sleep(1)
 
-    async def wait_until_empty(self):
-        """Блокирует выполнение (используется в автотестах), пока очередь не опустеет."""
-        print("[TaskQueue] ⏳ Синхронизация очереди: ожидание завершения всех процессов...")
-        await self._queue.join()
-        print("[TaskQueue] 🎉 Все задачи из очереди успешно обработаны.")
-
-    def is_empty(self) -> bool:
-        """Возвращает True, если в очереди нет задач."""
-        return self._queue.empty()
-
-    def has_active_tasks(self) -> bool:
-        """Возвращает True, если воркер сейчас выполняет активную задачу."""
-        return self.is_processing
-
-
-# Глобальный экземпляр для использования в других модулях
 task_manager = TaskQueue()

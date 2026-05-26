@@ -32,7 +32,7 @@ AVAILABLE_MODELS = {
 }
 
 # По умолчанию используем Qwen как основную модель
-CURRENT_LLM_MODEL = AVAILABLE_MODELS["qwen"]
+CURRENT_LLM_MODEL = AVAILABLE_MODELS["hermes"]
 
 # --- НАСТРОЙКИ LLM ---
 # Контроль скрытых рассуждений (CoT) для моделей, которые это поддерживают
@@ -41,3 +41,22 @@ THINKING_BUDGET = 0
 
 # Флаг режима сравнения моделей (активируется в бенчмарках)
 COMPARE_MODE = False
+
+def clear_temp_media():
+    """Полностью очищает временные медиа-файлы в папке data/temp_media/."""
+    media_extensions = {'.ogg', '.mp3', '.wav', '.jpg', '.jpeg', '.png', '.pdf', '.docx'}
+    
+    if TEMP_MEDIA_DIR.exists():
+        counter = 0
+        try:
+            for item in TEMP_MEDIA_DIR.iterdir():
+                if item.is_file() and item.suffix.lower() in media_extensions:
+                    item.unlink()
+                    counter += 1
+            if counter > 0:
+                print(f"[System] 🗑️ Автоочистка temp_media: удалено {counter} файлов")
+        except Exception as e:
+            print(f"[System] ⚠️ Ошибка при очистке медиа: {e}")
+    else:
+        # Если папки нет, создаем её, чтобы боту было куда качать файлы
+        TEMP_MEDIA_DIR.mkdir(parents=True, exist_ok=True)

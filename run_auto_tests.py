@@ -65,6 +65,15 @@ async def run_pipeline_tests():
     )
     await bus.publish(text_event)
 
+    # --- ТЕСТ 2.5: Проверка Роутинга Ссылок ---
+    print("\n[AUTO-TEST] 🟢 Запуск Теста №2.5: Имитация отправки ССЫЛКИ (URL)...")
+    url_event = TextReceivedEvent(
+        user_id=475811487,
+        text="Слушай, посмотри вот эту статью: https://vladteacher.tilda.ws/ или любой другой хабр"
+    )
+    await bus.publish(url_event)
+    await asyncio.sleep(5)  # Даем время на инференс страницы
+
     # --- ТЕСТ 3: Проверка Очереди и Голосового Пайплайна ---
     print("\n[AUTO-TEST] 🟢 Запуск Теста №3: Имитация отправки ГОЛОСА...")
     voice_event = VoiceReceivedEvent(
