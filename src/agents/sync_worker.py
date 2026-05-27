@@ -1,15 +1,18 @@
 import os
 import hashlib
-import logging  # Перешли на стандартный логгер
+import logging
 from pathlib import Path
 from src.core.config import VAULT_DIR
 from src.storage.sqlite_manager import SQLiteManager
 from src.cognitive.memory.semantic import memory
+from src.agents.parsers.md_chunker import MarkdownChunker
+from src.infrastructure.logger import agent_logger
 
 class SyncWorker:
     def __init__(self, db_path: str = "state.db"):
         self.db = SQLiteManager(db_path)
         self.vault_path = Path(VAULT_DIR)
+        self.chunker = MarkdownChunker()
 
     def _calculate_md5(self, file_path: Path) -> str:
         """Вычисляет MD5-хэш контента файла для детекции изменений текста."""
@@ -20,13 +23,22 @@ class SyncWorker:
                 while len(buf) > 0:
                     hasher.update(buf)
                     buf = f.read(65536)
-            return hasher.hexdigest()
+                return hasher.hexdigest()
         except Exception as e:
             print(f"[SyncWorker Ошибка] Хэширование файла {file_path.name}: {e}")
             return ""
 
+    async def _sync_file(self, file_path: Path) -> None:
+        """Обработка и индексация одного изменившегося файла Obsidian"""
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            parsed_chunks = self.chunker.parse_file(file_path=str(file_path.resolve()), content=content)
+            await memory.update_file_memory(file_path=str(file_path.resolve()), parsed_chunks=parsed_chunks)
+        except Exception as e:
+            agent_logger.error("SyncWorker", f"❌ Ошибка индексации файла {file_path}: {e}")
+
     async def sync_vault(self) -> str:
-        print("[SyncWorker] Старт инкрементальной синхронизации базы знаний...")
+        agent_logger.info("SyncWorker", "Старт инкрементальной синхронизации базы знаний...")
         
         if not self.vault_path.exists():
             return f"❌ Ошибка: Директория Vault {self.vault_path} не найдена."
@@ -51,17 +63,10 @@ class SyncWorker:
 
             if not stored_state:
                 file_hash = self._calculate_md5(file_path)
-                content = file_path.read_text(encoding='utf-8', errors='ignore')
-                
-                await memory.memorize_note(
-                    note_id=file_path.name,
-                    content=content,
-                    metadata={"source": "SyncWorker_New", "title": file_path.stem}
-                )
-                
+                await self._sync_file(file_path)
                 self.db.update_file_state(str_path, mtime, file_hash)
                 added_count += 1
-                print(f"[SyncWorker] ✅ Новая заметка добавлена в индекс: {file_path.name}")
+                agent_logger.info("SyncWorker", f"✅ Новая заметка добавлена в индекс: {file_path.name}")
 
             else:
                 stored_mtime, stored_hash = stored_state
@@ -69,17 +74,10 @@ class SyncWorker:
                     current_hash = self._calculate_md5(file_path)
                     
                     if current_hash != stored_hash:
-                        content = file_path.read_text(encoding='utf-8', errors='ignore')
-                        
-                        await memory.memorize_note(
-                            note_id=file_path.name,
-                            content=content,
-                            metadata={"source": "SyncWorker_Update", "title": file_path.stem}
-                        )
-                        
+                        await self._sync_file(file_path)
                         self.db.update_file_state(str_path, mtime, current_hash)
                         updated_count += 1
-                        print(f"[SyncWorker] 🔄 Обновлены векторы для: {file_path.name}")
+                        agent_logger.info("SyncWorker", f"🔄 Обновлены векторы для: {file_path.name}")
                     else:
                         self.db.update_file_state(str_path, mtime, stored_hash)
 
@@ -87,12 +85,12 @@ class SyncWorker:
             if registered_path not in current_paths_str:
                 filename = os.path.basename(registered_path)
                 
-                if hasattr(memory, 'delete_note'):
-                    await memory.delete_note(filename)
+                if hasattr(memory, 'delete_file_chunks'):
+                    await memory.delete_file_chunks(registered_path)
                 
                 self.db.delete_file_state(registered_path)
                 deleted_count += 1
-                print(f"[SyncWorker] 🗑️ Удалена из индекса стертая заметка: {filename}")
+                agent_logger.info("SyncWorker", f"🗑️ Удалена из индекса стертая заметка: {filename}")
 
         report = f"Синхронизация завершена: +{added_count} новых, ~{updated_count} измененных, -{deleted_count} удаленных."
         return report

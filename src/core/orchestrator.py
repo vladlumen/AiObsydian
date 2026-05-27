@@ -40,27 +40,50 @@ class Orchestrator:
             await res
 
     async def handle_text_event(self, event: TextReceivedEvent):
-        """Роутер текста: Поиск, Схемы, Сортировка, Видео, Ссылки или Инжест заметки."""
-        text_lower = event.text.lower().strip()
-        urls = URL_REGEX.findall(event.text)
+        """Обработка входящего текста с обязательным RAG-поиском по базе знаний."""
+        print(f"[Orchestrator] 🔍 Получен текстовый запрос от {event.user_id}: '{event.text}'")
         
-        if text_lower.startswith("?") or text_lower.endswith("?"):
-            if text_lower.startswith("?"):
-                event.text = event.text[1:].strip()
-            task_manager.add_task(self._process_text, event)
-        elif text_lower.startswith("!схема"):
-            event.text = event.text.replace("!схема", "", 1).strip()
-            task_manager.add_task(self._generate_canvas, event)
-        elif text_lower == "!сортировка":
-            task_manager.add_task(self._run_clerk, event)
-        elif urls:
-            target_url = urls[0].lower()
-            if "tiktok.com" in target_url or "youtube.com/shorts" in target_url or "youtu.be" in target_url:
-                task_manager.add_task(self._process_video_pipeline, event, urls[0])
+        try:
+            from src.interfaces.telegram.bot import bot
+            await bot.send_chat_action(chat_id=event.user_id, action="typing")
+
+            # 1. Запрашиваем контекст из векторной базы знаний (RAG)
+            context = ""
+            try:
+                # Ищем топ-3 релевантных совпадений в LanceDB
+                search_results = await memory.search(event.text, top_k=3)
+                if search_results:
+                    context = "\n".join([res["text"] for res in search_results])
+                    print(f"[Orchestrator] 🧠 Найдено контекста: {len(search_results)} фрагментов.")
+            except Exception as e_mem:
+                print(f"[Orchestrator ⚠️ Ошибка поиска по памяти]: {e_mem}")
+
+            # 2. Формируем обогащенный промпт для Hermes 3
+            system_instruction = "Ты — персональный ассистент. Отвечай кратко и по существу на основе предоставленного контекста Obsidian."
+            if context:
+                full_prompt = f"Контекст из базы знаний:\n{context}\n\nВопрос пользователя: {event.text}"
             else:
-                task_manager.add_task(self._process_url_pipeline, event, urls[0])
-        else:
-            task_manager.add_task(self._generate_note, event)
+                full_prompt = event.text
+
+            # 3. Генерируем ответ
+            response_text = await llm.generate_text(full_prompt, system_instruction)
+            
+            # 4. Отправляем ответ пользователю
+            if response_text and response_text.strip():
+                await bot.send_message(chat_id=event.user_id, text=response_text)
+            else:
+                await bot.send_message(chat_id=event.user_id, text="⚠️ Локальная модель вернула пустой ответ.")
+                
+            print(f"[Orchestrator] ✉️ Ответ сформирован: {response_text[:50] if response_text else 'None'}...")
+            
+        except Exception as e:
+            print(f"[Orchestrator ❌ Ошибка обработки текста]: {repr(e)}")
+            # Try to send error message to user
+            try:
+                from src.interfaces.telegram.bot import bot
+                await bot.send_message(chat_id=event.user_id, text="❌ Произошла ошибка при обработке вашего запроса.")
+            except:
+                pass
 
     async def handle_photo_event(self, event: PhotoReceivedEvent):
         """Пайплайн обработки изображений с автоматической зачисткой."""

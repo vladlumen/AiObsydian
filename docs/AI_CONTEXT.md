@@ -10,7 +10,8 @@ Processes multimodal inputs (Text, Voice, Images, Documents) using local models.
 - GPU: Single RTX 3090 24GB VRAM.
 - Storage Target: `C:\Users\vladislav\Documents\ObsidianVault` (accessed via `/mnt/c/...`).
 
-**Core Constraints & Architecture (v2.3 — May 2026)**
+**Core Constraints & Architecture (v2.4 — May 2026)**
+- **Hierarchical RAG and Hybrid Search (v2.4):** The system moved away from full-file note indexing. The `src/agents/parsers/md_chunker.py` module splits markdown by headers and tasks while preserving YAML frontmatter and `header_path`. Search in LanceDB operates in hybrid mode (Nomic Embed vectors + BM25 FTS) with `LinearCombinationReranker` for precise token and log extraction.
 - **VRAM Optimization (Sequential Processing):** To eliminate GPU bottlenecks and prevent `CUDA Out of Memory`, the system uses a strict **sequential task execution architecture via `TaskQueue` (1 active worker)**. Simultaneous inference of text and vision models inside the GPU is programmatically blocked.
 - **Automated Media Cleanup:** To avoid storage leakage inside WSL2, the `TaskQueue` worker automatically sweeps and deletes processed binary files (`.ogg`, `.png`, `.pdf`, `.docx`) from `data/temp_media/` immediately after task completion using try/finally blocks.
 - **API Stability (Direct HTTP client):** To prevent connection drops and unexpected token cuts by the official `ollama-python` library, all text and vision requests communicate with Ollama directly via async JSON payloads using `httpx` and the flat text generation endpoint `/api/generate`.
@@ -24,10 +25,12 @@ Processes multimodal inputs (Text, Voice, Images, Documents) using local models.
 - Cross-OS file system bridge: WSL2 successfully writes to Windows NTFS vault.
 - Integrated automated end-to-end testing pipeline (`run_auto_tests.py`) using real media files as fixtures to prevent EOF/parsing regressions.
 - Incremental Obsidian Vault synchronization (Khoj-pattern) via SQLite-based `mtime` and file hashing registry to prevent redundant embedding calculations.
+- **Hierarchical Markdown Chunking (Khoj-pattern):** The `MarkdownChunker` parser splits documents into structured chunks by headers (##, ###) and todo items (- [ ]), preserving header hierarchy and YAML frontmatter for precise retrieval. Context is injected into chunk text for vector model context linking.
 - STT Pipeline using `faster-whisper` (`large-v3`) deployed strictly on CPU in `int8` mode to save 100% of GPU VRAM for LLM/Vision inference.
 - Vision Pipeline using `llama3.2-vision:latest` (Ollama base64 injection) for advanced OCR on charts and code interfaces.
 - Document Parsing Pipeline: Functional parsers for `.pdf` (via `pypdf`) and `.docx` (via `docx2txt`) connected to a central `DocumentParser` router.
 - Text/Structuring Pipeline using **`hermes3:8b`** (configured at `temperature: 0.0` for maximum strictness; successfully bypasses internal reasoning overhead, strictly adheres to Obsidian layout constraints, and finishes complex RAG ingestion tasks under 12 seconds).
+- **Hybrid Vector Search (BM25 + Embeddings):** `VectorStore` implements `search_hybrid()` combining FTS (BM25) and vector similarity search with `LinearCombinationReranker`. Automatic FTS index creation on chunk insertion.
 
 **Engineering Manifesto Principles**
 1. **Research & Design First:** Architecture and hardware limits dictate code.

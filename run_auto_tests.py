@@ -1,9 +1,9 @@
 import asyncio
 import sys
 import shutil
+import os
 from pathlib import Path
 
-# Добавляем корневой путь проекта в sys.path для корректных импортов внутри WSL2
 sys.path.append(str(Path(__file__).parent))
 
 from src.infrastructure.event_bus import bus, PhotoReceivedEvent, VoiceReceivedEvent, TextReceivedEvent
@@ -21,8 +21,6 @@ async def run_pipeline_tests():
     test_photo_target = temp_dir / "test_todo.png"
     test_voice_target = temp_dir / "test_audio.ogg"
 
-    # --- КОПИРОВАНИЕ РЕАЛЬНЫХ ФИКСТУР ---
-    # 1. Картинка
     source_png = fixtures_dir / "test_todo.png"
     if source_png.exists():
         shutil.copy(source_png, test_photo_target)
@@ -30,7 +28,6 @@ async def run_pipeline_tests():
     else:
         print(f"[AUTO-TEST] ❌ Ошибка: Фикстура {source_png} не найдена!")
 
-    # 2. Аудиозапись
     source_ogg = fixtures_dir / "test_audio.ogg"
     if source_ogg.exists():
         shutil.copy(source_ogg, test_voice_target)
@@ -48,7 +45,6 @@ async def run_pipeline_tests():
         
     print("="*50 + "\n")
 
-    # --- ТЕСТ 1: Проверка Очереди и Vision Пайплайна ---
     print("[AUTO-TEST] 🟢 Запуск Теста №1: Имитация отправки ФОТО...")
     photo_event = PhotoReceivedEvent(
         user_id=475811487,
@@ -57,7 +53,6 @@ async def run_pipeline_tests():
     )
     await bus.publish(photo_event)
 
-    # --- ТЕСТ 2: Проверка Роутинга Текста ---
     print("\n[AUTO-TEST] 🟢 Запуск Теста №2: Имитация отправки ТЕКСТА (Запрос поиска)...")
     text_event = TextReceivedEvent(
         user_id=475811487,
@@ -65,16 +60,14 @@ async def run_pipeline_tests():
     )
     await bus.publish(text_event)
 
-    # --- ТЕСТ 2.5: Проверка Роутинга Ссылок ---
     print("\n[AUTO-TEST] 🟢 Запуск Теста №2.5: Имитация отправки ССЫЛКИ (URL)...")
     url_event = TextReceivedEvent(
         user_id=475811487,
         text="Слушай, посмотри вот эту статью: https://vladteacher.tilda.ws/ или любой другой хабр"
     )
     await bus.publish(url_event)
-    await asyncio.sleep(5)  # Даем время на инференс страницы
+    await asyncio.sleep(5)
 
-    # --- ТЕСТ 3: Проверка Очереди и Голосового Пайплайна ---
     print("\n[AUTO-TEST] 🟢 Запуск Теста №3: Имитация отправки ГОЛОСА...")
     voice_event = VoiceReceivedEvent(
         user_id=475811487,
@@ -82,7 +75,67 @@ async def run_pipeline_tests():
     )
     await bus.publish(voice_event)
 
-    # --- Ожидание завершения последовательной очереди задач ---
+    print("\n[AUTO-TEST] 🟢 Запуск Теста №4: Проверка гранулярности иерархического RAG...")
+    
+    test_note_path = base_dir / "tests" / "fixtures" / "test_khoj_granularity.md"
+    test_note_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    long_markdown_content = (
+        "---\n"
+        "title: Тест Гранулярности\n"
+        "project: Core_v2.4\n"
+        "---\n"
+        "# 📚 Главная База Знаний\n"
+        "Здесь находится много случайного нерелевантного текста, который модель не должна вытаскивать.\n"
+        "Мы забиваем контекст мусором, чтобы проверить, работает ли иерархический чанкинг.\n\n"
+        "## 🛠️ Спецификация Разработки\n"
+        "Текст про архитектуру, микросервисы и шину событий EventBus.\n\n"
+        "### 🔑 Секретный пароль\n"
+        "Ключ: 9922\n"
+    )
+    
+    with open(test_note_path, "w", encoding="utf-8") as f:
+        f.write(long_markdown_content)
+    
+    try:
+        from src.agents.parsers.md_chunker import MarkdownChunker
+        from src.cognitive.memory.semantic import memory
+        
+        chunker = MarkdownChunker()
+        parsed_chunks = chunker.parse_file(file_path=str(test_note_path), content=long_markdown_content)
+        await memory.update_file_memory(file_path=str(test_note_path), parsed_chunks=parsed_chunks)
+        
+        search_query = "Какой там секретный пароль ключа?"
+        retrieved_chunks = await memory.retrieve_context(query=search_query, limit=1)
+        
+        if not retrieved_chunks:
+            print("[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН: Память вернула пустой результат!")
+        else:
+            top_chunk = retrieved_chunks[0]
+            chunk_text = top_chunk["text"]
+            chunk_meta = top_chunk["metadata"]
+            
+            assert "Ключ: 9922" in chunk_text, f"Ожидался пароль, но получено: {chunk_text}"
+            assert "Мы забиваем контекст мусором" not in chunk_text, "Ошибка: извлечен лишний текст из начала файла!"
+            
+            header_path = chunk_meta.get("header_path", "")
+            frontmatter = chunk_meta.get("frontmatter", {})
+            
+            assert header_path == "📚 Главная База Знаний > 🛠️ Спецификация Разработки > 🔑 Секретный пароль", \
+                f"Неверная цепочка заголовков: {header_path}"
+            assert frontmatter.get("project") == "Core_v2.4", "YAML метаданные не унаследованы!"
+            
+            print("[AUTO-TEST] ✅ Тест №4 УСПЕШНО ПРОЙДЕН: Иерархический чанкинг выделил точный блок текста.")
+            print(f"[AUTO-TEST] 🧩 Извлеченный чанк: [{header_path}] -> {chunk_text}")
+            
+    except AssertionError as ae:
+        print(f"[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН (Ошибка утверждения): {ae}")
+    except Exception as e:
+        print(f"[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН (Критический сбой): {e}")
+    finally:
+        if test_note_path.exists():
+            os.remove(test_note_path)
+
     print("\n[AUTO-TEST] ⏳ Ожидание обработки задач из TaskQueue воркером...")
     max_wait = 180
     elapsed = 0
@@ -106,7 +159,6 @@ async def run_pipeline_tests():
             print("[AUTO-TEST] ⚠️ Превышено время ожидания тестов!")
             break
 
-    # Грациозное закрытие коннекторов aiohttp
     try:
         from src.interfaces.telegram.bot import bot
         if hasattr(bot, 'session') and not bot.session.closed:
