@@ -3,7 +3,7 @@ import json
 import asyncio
 import lancedb
 import pyarrow as pa
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from src.infrastructure.logger import agent_logger
 from src.core.config import LANCEDB_DIR
 
@@ -55,6 +55,12 @@ class VectorStore:
 
         prepared_data = []
         for i, chunk in enumerate(chunks):
+            if not vectors[i]:
+                agent_logger.warning(
+                    "VectorStore",
+                    f"Пропущен чанк без эмбеддинга: {chunk.get('id', i)}",
+                )
+                continue
             metadata_str = json.dumps(chunk["metadata"], ensure_ascii=False)
             prepared_data.append({
                 "id": chunk["id"],
@@ -63,6 +69,10 @@ class VectorStore:
                 "vector": vectors[i],
                 "metadata": metadata_str
             })
+
+        if not prepared_data:
+            agent_logger.error("VectorStore", "Ни один чанк не получил эмбеддинг (проверьте Ollama nomic-embed-text).")
+            return
 
         try:
             self.table.add(prepared_data)
@@ -93,50 +103,107 @@ class VectorStore:
         except Exception as e:
             agent_logger.error("VectorStore", f"Ошибка записи: {e}")
 
+    def _rows_to_dicts(self, raw: Any) -> List[Dict[str, Any]]:
+        """LanceDB может вернуть list[dict], PyArrow Table или columnar pydict."""
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+        if hasattr(raw, "to_pylist"):
+            return [r for r in raw.to_pylist() if isinstance(r, dict)]
+        if hasattr(raw, "to_pydict"):
+            columnar = raw.to_pydict()
+            if not columnar:
+                return []
+            length = len(next(iter(columnar.values())))
+            return [
+                {col: columnar[col][i] for col in columnar}
+                for i in range(length)
+            ]
+        return []
+
+    def _parse_metadata_field(self, meta: Any) -> Dict[str, Any]:
+        if isinstance(meta, dict):
+            return meta
+        if isinstance(meta, str) and meta.strip():
+            try:
+                return json.loads(meta)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    def _normalize_hit(self, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Единый контракт для RAG: text и header_path всегда на верхнем уровне."""
+        meta = self._parse_metadata_field(doc.get("metadata"))
+
+        text = doc.get("text")
+        if text is None:
+            text = meta.get("text", "")
+        text = str(text).strip() if text is not None else ""
+        if not text:
+            return None
+
+        header_path = doc.get("header_path") or meta.get("header_path", "")
+
+        return {
+            "id": doc.get("id"),
+            "file_path": doc.get("file_path") or meta.get("file_name", "Unknown"),
+            "text": text,
+            "header_path": header_path,
+            "score": doc.get("_score") or doc.get("_distance") or doc.get("score"),
+            "metadata": meta,
+        }
+
+    def _normalize_search_results(self, raw: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for doc in self._rows_to_dicts(raw):
+            hit = self._normalize_hit(doc)
+            if hit:
+                normalized.append(hit)
+        return normalized
+
     async def search(self, query_vector: list, limit: int = 5) -> List[Dict[str, Any]]:
-        return self.table.search(query_vector).limit(limit).to_arrow().to_pylist()
+        arrow = self.table.search(query_vector).limit(limit).to_arrow()
+        return self._normalize_search_results(arrow)
+
+    async def _vector_search_raw(self, query_vector: List[float], limit: int) -> Any:
+        return self.table.search(query_vector).limit(limit).to_arrow()
 
     async def search_hybrid(self, query_text: str, query_vector: List[float], limit: int = 5) -> List[Dict[str, Any]]:
         """
-        Выполняет гибридный поиск (Векторы + BM25) с применением линейного реранкинга.
+        Гибридный поиск (вектор + BM25). Результат всегда List[dict] с полем text.
         """
+        formatted: List[Dict[str, Any]] = []
+
         try:
             from lancedb.rerankers import LinearCombinationReranker
-            
-            reranker = LinearCombinationReranker(weight=0.3)
 
-            results = (
+            reranker = LinearCombinationReranker(weight=0.3)
+            query = (
                 self.table.search(query_type="hybrid")
                 .vector(query_vector)
                 .text(query_text)
                 .rerank(reranker=reranker)
                 .limit(limit)
-                .to_list()
             )
-            
-            formatted_results = []
-            for doc in results:
-                formatted_results.append({
-                    "id": doc.get("id"),
-                    "file_path": doc.get("file_path"),
-                    "text": doc.get("text"),
-                    "score": doc.get("_score"),
-                    "metadata": json.loads(doc.get("metadata", "{}"))
-                })
-                
-            return formatted_results
-
+            # to_arrow().to_pylist() стабильнее, чем to_list() между версиями LanceDB
+            raw = query.to_arrow()
+            formatted = self._normalize_search_results(raw)
+            if formatted:
+                agent_logger.info("VectorStore", f"Гибридный поиск: {len(formatted)} чанков.")
+                return formatted
         except Exception as e:
             agent_logger.error("VectorStore", f"Ошибка гибридного поиска: {e}")
-            try:
-                results = self.table.search(query_vector).limit(limit).to_list()
-                return [{
-                    "id": d.get("id"),
-                    "file_path": d.get("file_path"),
-                    "text": d.get("text"),
-                    "score": d.get("_distance"),
-                    "metadata": json.loads(d.get("metadata", "{}"))
-                } for d in results]
-            except Exception as backup_error:
-                agent_logger.error("VectorStore", f"Критическая ошибка: {backup_error}")
-                return []
+
+        try:
+            raw = await self._vector_search_raw(query_vector, limit)
+            formatted = self._normalize_search_results(raw)
+            if formatted:
+                agent_logger.info(
+                    "VectorStore",
+                    f"Fallback векторный поиск: {len(formatted)} чанков.",
+                )
+            return formatted
+        except Exception as backup_error:
+            agent_logger.error("VectorStore", f"Критическая ошибка поиска: {backup_error}")
+            return []

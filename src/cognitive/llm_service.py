@@ -101,10 +101,36 @@ class LLMService:
             return ""
 
     async def get_embedding(self, text: str, model_name: str = "nomic-embed-text") -> list[float]:
-        payload = {"model": model_name, "prompt": text}
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{self.base_url}/api/embeddings", json=payload, timeout=30.0)
-            response.raise_for_status()
-            return response.json().get("embedding", [])
+        if not text or not text.strip():
+            return []
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/embed",
+                    json={"model": model_name, "input": text},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                embeddings = data.get("embeddings")
+                if embeddings:
+                    return embeddings[0]
+                return data.get("embedding", []) or []
+        except Exception as e:
+            print(f"[LLMService] ⚠️ /api/embed недоступен ({e}), пробую legacy /api/embeddings...")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": model_name, "prompt": text},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                return response.json().get("embedding", []) or []
+        except Exception as e:
+            print(f"[LLMService] ❌ Ошибка эмбеддинга: {e}")
+            return []
 
 llm = LLMService()

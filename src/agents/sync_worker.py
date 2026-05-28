@@ -2,17 +2,30 @@ import os
 import hashlib
 import logging
 from pathlib import Path
-from src.core.config import VAULT_DIR
+from src.core.config import VAULT_DIR, DATA_DIR
 from src.storage.sqlite_manager import SQLiteManager
 from src.cognitive.memory.semantic import memory
 from src.agents.parsers.md_chunker import MarkdownChunker
 from src.infrastructure.logger import agent_logger
 
 class SyncWorker:
-    def __init__(self, db_path: str = "state.db"):
+    def __init__(self, db_path: str | None = None):
+        if db_path is None:
+            db_path = str(DATA_DIR / "state.db")
         self.db = SQLiteManager(db_path)
         self.vault_path = Path(VAULT_DIR)
         self.chunker = MarkdownChunker()
+
+    async def index_single_file(self, file_path: Path) -> None:
+        """Индексация одного файла сразу после создания (без полного скана Vault)."""
+        if not file_path.exists():
+            return
+        await self._sync_file(file_path)
+        str_path = str(file_path.resolve())
+        mtime = file_path.stat().st_mtime
+        file_hash = self._calculate_md5(file_path)
+        self.db.update_file_state(str_path, mtime, file_hash)
+        agent_logger.info("SyncWorker", f"Мгновенная индексация: {file_path.name}")
 
     def _calculate_md5(self, file_path: Path) -> str:
         """Вычисляет MD5-хэш контента файла для детекции изменений текста."""

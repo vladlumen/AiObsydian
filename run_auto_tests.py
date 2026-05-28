@@ -137,27 +137,11 @@ async def run_pipeline_tests():
             os.remove(test_note_path)
 
     print("\n[AUTO-TEST] ⏳ Ожидание обработки задач из TaskQueue воркером...")
-    max_wait = 180
-    elapsed = 0
-    
-    while True:
-        has_tasks = False
-        if hasattr(task_manager, 'is_empty') and not task_manager.is_empty():
-            has_tasks = True
-        if hasattr(task_manager, 'has_active_tasks') and task_manager.has_active_tasks():
-            has_tasks = True
-            
-        if not has_tasks:
-            break
-            
-        await asyncio.sleep(5)
-        elapsed += 5
-        if elapsed % 15 == 0:
-            print(f"[AUTO-TEST] Ждем завершения... Прошло {elapsed} сек.")
-            
-        if elapsed >= max_wait:
-            print("[AUTO-TEST] ⚠️ Превышено время ожидания тестов!")
-            break
+    try:
+        await asyncio.wait_for(task_manager.queue.join(), timeout=180)
+        print("[AUTO-TEST] 🎉 Все задачи в TaskQueue успешно обработаны воркером.")
+    except asyncio.TimeoutError:
+        print("[AUTO-TEST] ⚠️ Превышено время ожидания завершения задач!")
 
     try:
         from src.interfaces.telegram.bot import bot
