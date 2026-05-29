@@ -1,6 +1,6 @@
 # 📑 Personal AI Assistant (Obsidian + Telegram) — Context Map for LLM
 
-**Project Goal**
+**Project Goal** 
 Telegram-based personal AI assistant for autonomous knowledge management.
 Runs inside WSL2 (Ubuntu) but manipulates markdown files in a Windows Obsidian Vault via `/mnt/c/`.
 Processes multimodal inputs (Text, Voice, Images, Documents) using local models.
