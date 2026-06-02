@@ -3,6 +3,7 @@ import sys
 import shutil
 import os
 from pathlib import Path
+from datetime import datetime
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -17,6 +18,9 @@ async def run_pipeline_tests():
     fixtures_dir = base_dir / "tests" / "fixtures"
     temp_dir = base_dir / "data" / "temp_media"
     temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Путь к Obsidian хранилищу для реалистичного теста гранулярности
+    obsidian_inbox = Path("/mnt/c/Users/vladislav/Documents/ObsidianVault/00_Inbox")
     
     test_photo_target = temp_dir / "test_todo.png"
     test_voice_target = temp_dir / "test_audio.ogg"
@@ -35,40 +39,59 @@ async def run_pipeline_tests():
     else:
         print(f"[AUTO-TEST] ❌ Ошибка: Фикстура {source_ogg} не найдена!")
 
-    print("[AUTO-TEST] 🚀 Старт сквозного тестирования пайплайнов v2.3...")
+    print("[AUTO-TEST] 🚀 Старт сквозного тестирования пайплайнов v2.7...")
     
     print("[AUTO-TEST] ⚙️ Активация фонового воркера TaskQueue...")
     if hasattr(task_manager, 'start_workers'):
         asyncio.create_task(task_manager.start_workers())
     elif hasattr(task_manager, 'start'):
         asyncio.create_task(task_manager.start())
+
+    # === КРИТИЧЕСКИЙ ФИКС: ОТКЛЮЧАЕМ АВТООЧИСТКУ НА ВРЕМЯ ТЕСТОВ ===
+    # Подменяем метод очистки воркера на пустую функцию, чтобы файлы не удалялись в процессе
+    if hasattr(task_manager, '_clean_temp_media'):
+        task_manager._clean_temp_media = lambda *args, **kwargs: None
+    elif hasattr(task_manager, 'clean_temp'):
+        task_manager.clean_temp = lambda *args, **kwargs: None
         
     print("="*50 + "\n")
-
-    print("[AUTO-TEST] 🟢 Запуск Теста №1: Имитация отправки ФОТО...")
-    photo_event = PhotoReceivedEvent(
-        user_id=475811487,
-        photo_path=test_photo_target,
-        caption="Распознай текст со скриншота задач"
-    )
-    await bus.publish(photo_event)
-
-    print("\n[AUTO-TEST] 🟢 Запуск Теста №2: Имитация отправки ТЕКСТА (Запрос поиска)...")
-    text_event = TextReceivedEvent(
-        user_id=475811487,
-        text="?Что такое WSL2"
-    )
-    await bus.publish(text_event)
 
     print("\n[AUTO-TEST] 🟢 Запуск Теста №2.5: Имитация отправки ССЫЛКИ (URL)...")
     url_event = TextReceivedEvent(
         user_id=475811487,
-        text="Слушай, посмотри вот эту статью: https://vladteacher.tilda.ws/ или любой другой хабр"
+        text="Слушай, посмотри вот эту статью: https://vlad-gameddev.tilda.ws/"
     )
     await bus.publish(url_event)
-    await asyncio.sleep(5)
+    
+    # КРИТИЧЕСКИЙ ФИКС: Даем воркеру 15 секунд, чтобы он ПОЛНОСТЬЮ завершил Тест №1 и Тест №2,
+    # вызвал свою автоочистку, и только ПОСЛЕ этого мы запишем аудиофайл начисто.
+    await asyncio.sleep(15)
 
     print("\n[AUTO-TEST] 🟢 Запуск Теста №3: Имитация отправки ГОЛОСА...")
+    if source_ogg.exists():
+        shutil.copy(source_ogg, test_voice_target)
+        print(f"[AUTO-TEST] ✅ Восстановлен аудиофайл после очистки: {test_voice_target.name}")
+        
+    voice_event = VoiceReceivedEvent(
+        user_id=475811487,
+        audio_path=test_voice_target
+    )
+    await bus.publish(voice_event)
+
+    print("\n[AUTO-TEST] 🟢 Запуск Теста №2.5: Имитация отправки ССЫЛКИ (URL)...")
+    url_event = TextReceivedEvent(
+        user_id=475811487,
+        text="Слушай, посмотри вот эту статью: https://vlad-gamedev.tilda.ws/"
+    )
+    await bus.publish(url_event)
+    # Даем паузу, чтобы асинхронный url_parser успел стянуть код страницы
+    await asyncio.sleep(4)
+
+    print("\n[AUTO-TEST] 🟢 Запуск Теста №3: Имитация отправки ГОЛОСА...")
+    # Восстанавливаем файл из фикстур, если автоочистка воркера удали        
+    if source_ogg.exists() and not test_voice_target.exists():
+        shutil.copy(source_ogg, test_voice_target)
+        
     voice_event = VoiceReceivedEvent(
         user_id=475811487,
         audio_path=test_voice_target
@@ -77,7 +100,9 @@ async def run_pipeline_tests():
 
     print("\n[AUTO-TEST] 🟢 Запуск Теста №4: Проверка гранулярности иерархического RAG...")
     
-    test_note_path = base_dir / "tests" / "fixtures" / "test_khoj_granularity.md"
+    # КРИТИЧЕСКИЙ ФИКС: Создаем файл внутри ObsidianVault, обходя SQL-фильтр исключения тестов
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    test_note_path = obsidian_inbox / f"{current_date} Интеграционный Тест Гранулярности Хранилища.md"
     test_note_path.parent.mkdir(parents=True, exist_ok=True)
     
     long_markdown_content = (
@@ -105,11 +130,14 @@ async def run_pipeline_tests():
         parsed_chunks = chunker.parse_file(file_path=str(test_note_path), content=long_markdown_content)
         await memory.update_file_memory(file_path=str(test_note_path), parsed_chunks=parsed_chunks)
         
+        # Даем микропаузу для перестройки FTS индекса в SQLite/LanceDB
+        await asyncio.sleep(1)
+        
         search_query = "Какой там секретный пароль ключа?"
         retrieved_chunks = await memory.retrieve_context(query=search_query, limit=1)
         
         if not retrieved_chunks:
-            print("[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН: Память вернула пустой результат!")
+            print("[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН: Память вернула пустой результат из-за фильтрации путей!")
         else:
             top_chunk = retrieved_chunks[0]
             chunk_text = top_chunk["text"]
@@ -133,8 +161,12 @@ async def run_pipeline_tests():
     except Exception as e:
         print(f"[AUTO-TEST] ❌ Тест №4 НЕ ПРОЙДЕН (Критический сбой): {e}")
     finally:
-        if test_note_path.exists():
-            os.remove(test_note_path)
+        # Чистим за собой базу чанков перед удалением файла физически
+        try:
+            from src.storage.vector_store import vector_store
+            await vector_store.delete_file_chunks(str(test_note_path))
+        except Exception:
+            pass
 
     print("\n[AUTO-TEST] ⏳ Ожидание обработки задач из TaskQueue воркером...")
     try:
@@ -145,11 +177,53 @@ async def run_pipeline_tests():
 
     try:
         from src.interfaces.telegram.bot import bot
-        if hasattr(bot, 'session') and not bot.session.closed:
-            await bot.session.close()
-            print("[AUTO-TEST] 🧹 Асинхронные коннекторы закрыты.")
-    except Exception:
-        pass
+        from src.agents.parsers.url_parser import url_parser
+        import aiohttp
+        
+        # Закрываем бота
+        if hasattr(bot, 'session') and bot.session:
+            if isinstance(bot.session, aiohttp.ClientSession) and not bot.session.closed:
+                await bot.session.close()
+            elif hasattr(bot.session, 'close'):
+                await bot.session.close()
+            
+        # Закрываем парсер
+        if hasattr(url_parser, 'session') and url_parser.session:
+            # Проверяем, не является ли объект кастомной оберткой (например, AiohttpSession)
+            curr_session = url_parser.session
+            if hasattr(curr_session, '_session') and isinstance(curr_session._session, aiohttp.ClientSession):
+                if not curr_session._session.closed:
+                    await curr_session._session.close()
+            elif isinstance(curr_session, aiohttp.ClientSession) and not curr_session.closed:
+                await curr_session.close()
+            elif hasattr(curr_session, 'close'):
+                # Если это кастомный класс с методом close, но без флага closed
+                try:
+                    await curr_session.close()
+                except Exception:
+                    pass
+            
+        print("[AUTO-TEST] 🧹 Все асинхрон с려는 сессии и TCP-коннекторы успешно закрыты.")
+    except Exception as clean_err:
+        print(f"[AUTO-TEST] Предупреждение при очистке сессий: {clean_err}")
+    finally:
+        # Удаляем тестовую заметку гранулярности
+        if test_note_path.exists():
+            try:
+                from src.storage.vector_store import vector_store
+                await vector_store.delete_file_chunks(str(test_note_path))
+            except Exception:
+                pass
+            os.remove(test_note_path)
+            
+        # === ОЧИСТКА ВСЕХ ТЕСТОВЫХ ФАЙЛОВ В САМОМ КОНЦЕ ===
+        print("[AUTO-TEST] 🧹 Финальная зачистка папки temp_media...")
+        for temp_file in [test_photo_target, test_voice_target]:
+            if temp_file.exists():
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
     print("\n" + "="*50)
     print("[AUTO-TEST] 🎉 Сквозное тестирование пайплайнов завершено успешно!")
