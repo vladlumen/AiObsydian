@@ -183,6 +183,7 @@ class VectorStore:
                 self.table.search(query_type="hybrid")
                 .vector(query_vector)
                 .text(query_text)
+                .where("NOT (file_path LIKE '%tests/%' OR file_path LIKE '%test_%')") # Исключаем тестовый мусор
                 .rerank(reranker=reranker)
                 .limit(limit)
             )

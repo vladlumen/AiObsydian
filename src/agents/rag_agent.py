@@ -8,7 +8,7 @@ class RAGAgent:
     def __init__(self):
         pass
 
-    async def process_query(self, event: TextReceivedEvent):
+    async def process_query(self, event: TextReceived_event):
         """Выполнение гибридного RAG-поиска и генерация ответа через Hermes 3."""
         query = event.text.strip().lstrip('?').rstrip('?').strip()
         if not query:
@@ -21,6 +21,12 @@ class RAGAgent:
         try:
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
             
+            # --- 0. CHECK CACHE (L1/L2) ---
+            cached_response = await memory.get_cached_response(query)
+            if cached_response:
+                await bot.send_message(chat_id=event.user_id, text=f"✨ **[Cache Hit]**\n\n{cached_response}")
+                return
+
             # 1. Сбор контекста
             formatted_context_chunks = []
             async with telemetry.track(f"RAG_Retrieve_Context_{event.user_id}"):
@@ -60,7 +66,7 @@ class RAGAgent:
                 "ответь: 'Данных в базе знаний нет'.\n"
                 "Строго используй Obsidian Markdown для оформления ответа."
             )
-            
+
             if context_block:
                 full_prompt = f"<context>\n{context_block}\n</context>\n\nВопрос: {query}"
             else:
@@ -80,16 +86,18 @@ class RAGAgent:
                     finally:
                         await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
 
-            # 4. Отправка
+            # 4. Отправка и сохранение
             if response_text and response_text.strip():
                 await bot.send_message(chat_id=event.user_id, text=response_text)
+                # Сохраняем в кэш для следующего раза
+                await memory.save_to_cache(query, response_text)
             else:
                 await bot.send_message(chat_id=event.user_id, text="⚠️ Локальная модель вернула пустой ответ.")
                 
         except Exception as e:
             print(f"[RAGAgent ❌ Ошибка пайплайна]: {repr(e)}")
             try:
-                await bot.send_message(chat_id=event.user_id, text="❌ Ошибка при извлечении контекста.")
+                await bot.send_message(chat_id=event.user_id, text="❌ Ошибка при обработке запроса.")
             except:
                 pass
 

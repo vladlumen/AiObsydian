@@ -1,6 +1,6 @@
 # 📑 Personal AI Assistant (Obsidian + Telegram) — Context Map for LLM
 
-**Project Goal** 
+**Project Goal**
 Telegram-based personal AI assistant for autonomous knowledge management.
 Runs inside WSL2 (Ubuntu) but manipulates markdown files in a Windows Obsidian Vault via `/mnt/c/`.
 Processes multimodal inputs (Text, Voice, Images, Documents) using local models.
@@ -8,14 +8,18 @@ Processes multimodal inputs (Text, Voice, Images, Documents) using local models.
 **Hardware & Environment**
 - Environment: WSL2 (Ubuntu) bridged to Windows 11 host. Windows bat-scripts automate `ollama serve` lifecycle and clean up background processes via `taskkill`.
 - GPU: Single RTX 3090 24GB VRAM.
-- Storage Target: `C:\Users\vladislav\Documents\ObsidianVault` (accessed via `/mnt/c/...`).
+- Storage Target: `/w/home/vladislav/projects/agent_project/` (accessed via WSL bridge to Obsidian).
 
-**Core Constraints & Architecture (v2.5 — May 2026)**
-- **Hierarchical RAG and Hybrid Search (v2.5):** The system moved away from full-file note indexing. The `src/agents/parsers/md_chunker.py` module splits markdown by headers and tasks while preserving YAML frontmatter and `header_path`. Search in LanceDB operates in hybrid mode (Nomic Embed vectors + BM25 FTS) with `LinearCombinationReranker` for precise token and log extraction.
-- **Изолированный RAG-пайплайн для поисковых запросов (v2.5):** Поисковые запросы с префиксом `?` обрабатываются изолированным RAGAgent. Чтение файлов целиком заменено на семантическое извлечение чанков через метод `memory.retrieve_context(query)`. Контекст обертывается в XML-теги `<context>` для жесткого контроля галлюцинаций модели Hermes 3. Температура инференса выставляется в 0.0, а системный промпт разрешает свободный контекстный анализ содержания и сопоставление синонимов, выдавая отказ ('Данных в базе знаний нет') только при полной нерелевантности контекста. Имя исходного файла принудительно инъецируется в тело контекста чанка для сквозной связки.
+**Core Constraints & Architecture (v2.6 — June 2026)**
+- **Multi-level Caching (L1/L2/L3):** To minimize latency and GPU load, a three-tier cache is implemented:
+    1. **L1 (Exact Match):** SQLite-based. Rapid search via `hash(query)`. Instant response (0.01s) for identical queries.
+    2. **L2 (Semantic Match):** LanceDB-based. Vector search using embeddings. If cosine similarity exceeds threshold, returns cached answer without LLM call.
+    3. **L3 (Full RAG):** Fallback to the full pipeline: `Retrieval (LanceDB) -> Context Injection -> LLM Inference (Hermes 3) -> Cache Save`.
+- **Hierarchical RAG and Hybrid Search (v2.6):** The system uses the L1/L2/L3 caching strategy described above. The `src/agents/parsers/md_chunker.py` module splits markdown by headers and tasks while preserving YAML frontmatter and `header_path`. Search in LanceDB operates in hybrid mode (Nomic Embed vectors + BM25 FTS) with `LinearCombinationReranker` for precise token and log extraction.
+- **Изолированный RAG-пайплайн для поисковых запросов (v2.6):** Поисковые запросы с префиксом `?` обрабатываются изолированным RAGAgent, используя многоуровневое кэширование (L1/L2). Чтение файлов целиком замене_но на семантическое извлечение чанков через метод `memory.retrieve_context(query)`. Контекст обертывается в XML-теги `<context>` для жесткого контроля галлюцинаций модели Hermes 3. Температура инференса выставляется в 0.0, а системный промпт разрешает свободный контекстный анализ содержания и сопоставление синонимов, выдавая отказ ('Данных в базе знаний нет') только при полной нерелевантности контекста. Имя исходного файла принудительно инъецируется в тело контекста чанка для сквозной связки.
 - **VRAM Optimization (Sequential Processing):** To eliminate GPU bottlenecks and prevent `CUDA Out of Memory`, the system uses a strict **sequential task execution architecture via `TaskQueue` (1 active worker)**. Simultaneous inference of text and vision models inside the GPU is programmatically blocked.
 - **Automated Media Cleanup:** To avoid storage leakage inside WSL2, the `TaskQueue` worker automatically sweeps and deletes processed binary files (`.ogg`, `.png`, `.pdf`, `.docx`) from `data/temp_media/` immediately after task completion using try/finally blocks.
-- **API Stability (Direct HTTP client):** To prevent connection drops and unexpected token cuts by the official `ollama-python` library, all text and vision requests communicate with Ollama directly via async JSON payloads using `httpx` and the flat text generation endpoint `/api/generate`.
+- **API Stability (Direct HTTP client):** To prevent connection drops and unexpected token cuts by the official `ollama-python` library, all text and vision requests communicate with Ollala directly via async JSON payloads using `httpx` and the flat text generation endpoint `/api/generate`.
 - **Circular Imports Solution:** Lazy local imports are implemented inside the `Orchestrator` handlers to completely decouple the AI core from the `aiogram` Telegram interface during the system boot sequence.
 - **Event-Driven Composition:** Strict decoupling. Handlers publish typed events (`VoiceReceivedEvent`, `PhotoReceivedEvent`, `DocumentReceivedEvent`). The Orchestrator processes them (e.g., Audio -> STT -> Text) and re-publishes as a `TextReceivedEvent` to reuse the core Note Generation pipeline.
 - **Fail-Safes:** Hard timeouts, image compression before inference (Pillow limit 800px), filename sanitization (max 120 chars to prevent cut-off anomalies), case-insensitive regex parsing (`re.IGNORECASE`), and dynamic datetime extraction to prevent LLM hallucinations or metadata-driven crashes.

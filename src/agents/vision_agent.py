@@ -15,23 +15,26 @@ class VisionAgent:
             logger.error(f"[VisionAgent] Файл изображения не найден: {photo_path}")
             return
 
-        # Ленивые импорты тяжелых зависимостей для предотвращения циклических импортов
+        # Ленивые импорты для исключения циклических зависимостей при старте ядра
         from src.cognitive.vision_service import vision_service
         from src.interfaces.telegram.bot import bot
+        from src.core.prompt_loader import prompt_loader
 
         try:
-            # Уведомляем пользователя о начале анализа
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
             
-            prompt = event.caption.strip() if event.caption else (
-                "Распознай текст на изображении (если есть) и подробно опиши, что на нём показано. "
-                "Если это код или таблица, выведи их полностью."
-            )
+            # Подгружаем изолированный, строгий vision-промпт из prompts.yaml.
+            # Если пользователь передал текстовый комментарий к фото — добавляем его как контекст.
+            base_prompt = prompt_loader.get("vision_prompt")
+            if event.caption and event.caption.strip():
+                prompt = f"{base_prompt}\n\nДополнительное указание от пользователя: {event.caption.strip()}"
+            else:
+                prompt = base_prompt
 
             ocr_result = ""
             model_name = "llama3.2-vision"
             
-            # Инференс на GPU с захватом семафора VRAM
+            # Фоновый инференс на GPU с блокировкой семафора VRAM
             async with telemetry.track(f"Vision_Inference_{event.user_id}"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model(model_name)
@@ -41,15 +44,14 @@ class VisionAgent:
                         await vram_manager.unload_model(model_name)
 
             if ocr_result and ocr_result.strip():
-                logger.info(f"[VisionAgent] OCR завершено успешно. Длина результата: {len(ocr_result)}")
+                clean_ocr = ocr_result.strip()
+                logger.info(f"[VisionAgent] OCR завершено успешно. Длина результата: {len(clean_ocr)}")
                 
-                # Добавляем поясняющий заголовок для результирующего сообщения
-                text_to_publish = f"Результат распознавания изображения:\n\n{ocr_result}"
-                
-                # Публикуем результат в виде TextReceivedEvent для дальнейшей обработки текстовым RAG / Note конвейером
+                # КРИТИЧЕСКИЙ ФИКС: Публикуем СТРОГО чистый текст OCR без префиксов,
+                # чтобы NoteGeneratorAgent мог корректно замерить длину строки на входе.
                 text_event = TextReceivedEvent(
                     user_id=event.user_id,
-                    text=text_to_publish
+                    text=clean_ocr
                 )
                 await bus.publish(text_event)
             else:

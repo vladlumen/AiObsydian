@@ -16,8 +16,8 @@ class ObsidianWriter:
         """Очистка имени файла от запрещенных символов и ограничение длины."""
         # Удаляем спецсимволы и переносы строк (\n, \r)
         clean = re.sub(r'[\\/*?:"<>|\[\]\n\r]', "", filename).strip()
-        # Жестко ограничиваем длину имени файла (60 символов)
-        clean = clean[:60].strip()
+        # Жестко ограничиваем длину имени файла (120 символов)
+        clean = clean[:120].strip()
         return clean if clean else f"Idea_{datetime.now().strftime('%Y%m%d_%H%M')}"
 
     def create_note(self, title: str, content: str, custom_properties: str = "", model_name: str = "hermes3:8b") -> Path:

@@ -1,5 +1,7 @@
 import asyncio
+import os
 import re
+import sqlite3
 from datetime import datetime
 
 from src.infrastructure.logger import logger
@@ -21,21 +23,9 @@ class NoteGeneratorAgent:
         title = ""
         content = ""
 
-        props_match = re.search(
-            r"PROPERTIES:\s*(.*?)(?=\nTITLE:|\Z)",
-            raw,
-            re.DOTALL | re.IGNORECASE,
-        )
-        title_match = re.search(
-            r"TITLE:\s*(.*?)(?=\nCONTENT:|\Z)",
-            raw,
-            re.DOTALL | re.IGNORECASE,
-        )
-        content_match = re.search(
-            r"CONTENT:\s*(.*)\Z",
-            raw,
-            re.DOTALL | re.IGNORECASE,
-        )
+        props_match = re.search(r"PROPERTIES:\s*(.*?)(?=\nTITLE:|\Z)", raw, re.DOTALL | re.IGNORECASE)
+        title_match = re.search(r"TITLE:\s*(.*?)(?=\nCONTENT:|\Z)", raw, re.DOTALL | re.IGNORECASE)
+        content_match = re.search(r"CONTENT:\s*(.*)\Z", raw, re.DOTALL | re.IGNORECASE)
 
         if props_match:
             properties = props_match.group(1).strip()
@@ -53,11 +43,13 @@ class NoteGeneratorAgent:
         return match.group(0).rstrip(".,);]")
 
     def _format_old_context_block(self, chunks: list) -> str:
-        if not chunks:
+        if not chunks or not isinstance(chunks, list):
             return "<OLD_CONTEXT>\n(Связанных заметок в базе не найдено)\n</OLD_CONTEXT>"
 
         formatted_chunks = []
         for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
             file_path = chunk.get("file_path", "Unknown")
             meta = chunk.get("metadata") or {}
             if not isinstance(meta, dict):
@@ -72,6 +64,27 @@ class NoteGeneratorAgent:
         body = "\n\n".join(formatted_chunks)
         return f"<OLD_CONTEXT>\n{body}\n</OLD_CONTEXT>"
 
+    def _extract_clean_titles(self, chunks: list, current_title: str = "") -> str:
+        if not chunks or not isinstance(chunks, list):
+            return "Связанных заметок не найдено."
+            
+        titles = set()
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            file_path = chunk.get("file_path", "")
+            if file_path:
+                base_name = os.path.basename(file_path).replace(".md", "")
+                
+                # КРИТИЧЕСКИЙ ФИКС: Исключаем текущую заметку из списка связей,
+                # чтобы модель не зацикливала промпт внутри собственного контента.
+                if current_title and current_title.lower() in base_name.lower():
+                    continue
+                    
+                titles.add(f"[[{base_name}]]")
+                
+        return ", ".join(titles) if titles else "Связанных заметок не найдено."
+
     async def process_text(self, event: TextReceivedEvent):
         """LLM-структурирование входящего текста и запись заметки в Obsidian Vault."""
         raw_text = event.text.strip()
@@ -80,81 +93,152 @@ class NoteGeneratorAgent:
         if not raw_text or is_rag_query(raw_text):
             return
 
+        # === ТОТАЛЬНАЯ ЗАЩИТА НА ВХОДЕ (ДО КЭША) ===
+        if len(raw_text) < 150 and any(word in raw_text.lower() for word in ["ты", "задача", "промпт", "архитектор"]):
+            logger.warning(f"[NoteGeneratorAgent] 🛑 Входной фильтр отклонил мусорный/битый OCR-текст ({len(raw_text)} симв.). Пайплайн остановлен.")
+            return
+
         from src.cognitive.memory.semantic import memory
         from src.cognitive.llm_service import llm
         from src.core.prompt_loader import prompt_loader
         from src.agents.obsidian_writer import writer
         from src.agents.parsers.url_parser import url_parser
         from src.interfaces.telegram.bot import bot
+        from src.infrastructure.cache_manager import cache_manager
 
         current_date = datetime.now().strftime("%Y-%m-%d")
 
         try:
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-            context_query = raw_text[:500]
-            old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
-            async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
-                chunks = await memory.retrieve_context(context_query, limit=3)
-                old_context_block = self._format_old_context_block(chunks)
+            # Санитаризация строки для кэша
+            clean_cache_key = " ".join(raw_text.split()).strip()
 
-            url = self._extract_url(raw_text)
-            llm_response = ""
-
-            if url:
-                user_comment = URL_PATTERN.sub("", raw_text).strip() or "—"
-                async with telemetry.track(f"Note_URL_Fetch_{event.user_id}"):
-                    article_text = await asyncio.to_thread(
-                        url_parser.extract_text, url
-                    )
-
-                system_prompt = prompt_loader.get(
-                    "generate_web_note_prompt",
-                    old_context_block=old_context_block,
-                    current_date=current_date,
-                    user_comment=user_comment,
-                    url=url,
-                )
-                user_payload = (
-                    f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
-                )
+            # --- ИНТЕГРАЦИЯ КЭША (Intercept) ---
+            cached_response = await cache_manager.get_cached_response(clean_cache_key)
+            if cached_response:
+                logger.info(f"[NoteGeneratorAgent] Попадание в кэш для запроса пользователя.")
+                llm_response = cached_response
             else:
-                system_prompt = prompt_loader.get(
-                    "generate_note_prompt",
-                    old_context_block=old_context_block,
-                    current_date=current_date,
-                )
-                user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
+                # Cache Miss: Полный конвейер извлечения и инференса
+                context_query = raw_text[:500]
+                old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
+                available_links = "Связанных заметок не найдено."
 
-            async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
-                async with vram_manager.inference_lock:
-                    await vram_manager.request_model(config.CURRENT_LLM_MODEL)
-                    try:
-                        llm_response = await llm.generate_text(
-                            user_payload,
-                            system_prompt=system_prompt,
-                            model=config.CURRENT_LLM_MODEL,
-                        )
-                    finally:
-                        await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
+                async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
+                    chunks = await memory.retrieve_context(context_query, limit=3)
+                    old_context_block = self._format_old_context_block(chunks)
+                    available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
+
+                url = self._extract_url(raw_text)
+
+                if url:
+                    user_comment = URL_PATTERN.sub("", raw_text).strip() or "—"
+                    async with telemetry.track(f"Note_URL_Fetch_{event.user_id}"):
+                        article_text = await asyncio.to_thread(url_parser.extract_text, url)
+
+                    system_prompt = prompt_loader.get(
+                        "generate_web_note_prompt",
+                        old_context_block=old_context_block,
+                        available_links=available_links,
+                        current_date=current_date,
+                        user_comment=user_comment,
+                        url=url,
+                    )
+                    user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
+                else:
+                    system_prompt = prompt_loader.get(
+                        "generate_note_prompt",
+                        old_context_block=old_context_block,
+                        available_links=available_links,
+                        current_date=current_date,
+                    )
+                    user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
+
+                async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
+                    async with vram_manager.inference_lock:
+                        await vram_manager.request_model(config.CURRENT_LLM_MODEL)
+                        try:
+                            llm_response = await llm.generate_text(
+                                user_payload,
+                                system_prompt=system_prompt,
+                                model=config.CURRENT_LLM_MODEL,
+                            )
+                        finally:
+                            await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
+
+                if llm_response and llm_response.strip():
+                    await cache_manager.save_to_cache(clean_cache_key, llm_response)
 
             if not llm_response or not llm_response.strip():
+                await bot.send_message(chat_id=event.user_id, text="⚠️ Модель не смогла сформировать заметку.")
+                return
+
+            # Парсинг структурированного ответа (из кэша или свежей генерации)
+            properties, title, content = self._parse_llm_response(llm_response)
+
+            # === БЛОК АВТО-ОЧИСТКИ КЭША ПРИ ОБНАРУЖЕНИИ БРЕДА ===
+            if title and any(bad_word in title.lower() for bad_word in ["всемирной паутины", "системный архитектор обнаружил"]):
+                logger.warning(f"[NoteGeneratorAgent] 🚨 Обнаружен бред модели в ответе! Стираем этот хэш из кэша L1/L2.")
+                
+                query_hash = cache_manager._get_hash(clean_cache_key)
+                try:
+                    # Чистим L1 (SQLite)
+                    conn = sqlite3.connect(cache_manager.sqlite_path)
+                    conn.execute("DELETE FROM cache_l1 WHERE query_hash = ?", (query_hash,))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Чистим L2 (LanceDB)
+                    if cache_manager.l2_table_name in cache_manager.db.table_names():
+                        table = cache_manager.db.open_table(cache_manager.l2_table_name)
+                        table.delete(f"query_text = '{clean_cache_key}'")
+                        
+                    logger.info(f"[NoteGeneratorAgent] 🔥 Базы кэша успешно очищены от отравленного хэша.")
+                except Exception as cache_del_err:
+                    logger.error(f"Не удалось вычистить плохой кэш: {cache_del_err}")
+                
                 await bot.send_message(
-                    chat_id=event.user_id,
-                    text="⚠️ Модель не смогла сформировать заметку.",
+                    chat_id=event.user_id, 
+                    text="⚠️ Модель выдала некорректный галлюцинаторный ответ. Локальный кэш зачищен. Отправьте запрос повторно."
                 )
                 return
 
-            properties, title, content = self._parse_llm_response(llm_response)
-
             if title:
                 title = title.strip().replace('"', '').replace("'", "")
+                # Двойной Fail-Safe: обрезка по словам
+                if len(title) > 70:
+                    title = " ".join(title.split()[:8]) + "..."
                 title = f"{current_date} {title}"
             else:
                 title = f"{current_date} Заметка"
 
             if not content:
                 content = llm_response.strip()
+
+            # Слой нормализации разметки
+            if "![abstract]" in content or "!abstract" in content:
+                content = content.replace("> ![abstract] Резюме", "").replace("!abstract Резюме", "").strip()
+                content = content.lstrip(">").lstrip("!").replace("abstract]", "").strip()
+            
+            # Формируем гарантированный Callout-блок Obsidian на основе маркеров
+            target_marker = None
+            if "## Извлеченные факты" in content:
+                target_marker = "## Извлеченные факты"
+            elif "## Детали" in content:
+                target_marker = "## Детали"
+
+            if target_marker:
+                parts = content.split(target_marker)
+                summary_text = parts[0].strip().lstrip(">").strip()
+                facts_text = parts[1].strip()
+                
+                content = (
+                    f"> [!abstract] Резюме\n"
+                    f"> {summary_text}\n\n"
+                    f"{target_marker}\n"
+                    f"{facts_text}"
+                )
 
             note_path = writer.create_note(
                 title=title,
@@ -164,34 +248,21 @@ class NoteGeneratorAgent:
             )
 
             from src.agents.sync_worker import sync_worker
-
             try:
                 await sync_worker.index_single_file(note_path)
             except Exception as index_err:
-                logger.warning(
-                    f"[NoteGeneratorAgent] Заметка сохранена, но индексация RAG не удалась: {index_err!r}"
-                )
+                logger.warning(f"[NoteGeneratorAgent] Заметка сохранена, но индексация RAG не удалась: {index_err!r}")
 
-            logger.info(f"[NoteGeneratorAgent] Заметка записана: {note_path.name}")
+            logger.info(f"[NoteGeneratorAgent] Заметка успешно записана: {note_path.name}")
             await bot.send_message(
                 chat_id=event.user_id,
                 text=f"✅ Заметка сохранена в Obsidian:\n`{note_path.name}`",
             )
 
-        except ValueError as e:
-            logger.warning(f"[NoteGeneratorAgent] Ошибка обработки: {e}")
-            try:
-                await bot.send_message(chat_id=event.user_id, text=f"⚠️ {e}")
-            except Exception:
-                pass
-
         except Exception as e:
-            logger.error(f"[NoteGeneratorAgent ❌ Ошибка выполнения пайплайна]: {repr(e)}")
+            logger.error(f"[NoteGeneratorAgent ❌ Критическая ошибка]: {repr(e)}")
             try:
-                await bot.send_message(
-                    chat_id=event.user_id,
-                    text="❌ Произошла ошибка при создании заметки.",
-                )
+                await bot.send_message(chat_id=event.user_id, text="❌ Произошла ошибка при создании заметки.")
             except Exception:
                 pass
 
