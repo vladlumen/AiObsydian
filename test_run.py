@@ -2,12 +2,17 @@ import sys
 from pathlib import Path
 import asyncio
 
+# === ИСПРАВЛЕНИЕ БЕЗОПАСНОСТИ: Загружаем скрытые ключи из .env файла ===
+from dotenv import load_dotenv
+load_dotenv()  
+# ======================================================================
+
 # Добавляем корень проекта в пути поиска модулей Python
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-# Импортируем конфиг и проверяем пути
+# Импортируем конфиг и проверяем пути (теперь они безопасно подтянутся из .env)
 from src.core.config import BOT_TOKEN, ALLOWED_USER_ID, VAULT_DIR, TEMP_MEDIA_DIR
 from src.infrastructure.task_queue import task_manager
 from src.core.orchestrator import orchestrator
