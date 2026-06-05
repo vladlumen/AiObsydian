@@ -2,7 +2,7 @@ from pathlib import Path
 import os
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import Command  # Тот самый недостающий импорт
+from aiogram.filters import Command
 from src.infrastructure.event_bus import bus, TextReceivedEvent, VoiceReceivedEvent, PhotoReceivedEvent, DocumentReceivedEvent
 from src.core.config import TEMP_MEDIA_DIR
 from src.core import config 
@@ -58,11 +58,13 @@ async def process_model_selection(callback: CallbackQuery):
 # ==========================================
 
 @router.message(F.text)
-async def handle_text(message: Message):
+async def handle_text(message: Message, combined_text: str = None):
     """Ловим обычный текст, RAG-запросы и текстовые команды-хвосты."""
-    text = message.text.strip()
+    # Приоритет отдается склеенному тексту из middleware буферизации
+    source_text = combined_text if combined_text is not None else message.text
+    text = source_text.strip()
     
-    # ПЕРЕХВАТ ТЕКСТОВОЙ КОМАНДЫ СРАВНЕНИЯ (устаревает, но оставляем для совместимости)
+    # ПЕРЕХВАТ ТЕКСТОВОЙ КОМАНДЫ СРАВНЕНИЯ
     if text.startswith("!compare"):
         config.COMPARE_MODE = not config.COMPARE_MODE
         status = "ВКЛЮЧЕН (запросы идут на ВСЕ модели)" if config.COMPARE_MODE else "ВЫКЛЮЧЕН (работает одна модель)"
@@ -99,7 +101,7 @@ async def handle_text(message: Message):
      
     event = TextReceivedEvent(
         user_id=message.from_user.id,
-        text=message.text
+        text=text
     )
     await bus.publish(event)
 

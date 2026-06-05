@@ -46,12 +46,23 @@ class CacheManager:
         except Exception as e:
             agent_logger.error("CacheManager", f"L2 Init Error: {e}")
 
+    def _clean_query(self, text: str) -> str:
+        """Очищает текст от управляющих хвостов middleware для изоляции логики кэша."""
+        if "Инструкция по обработке:" in text:
+            parts = text.split("Инструкция по обработке:")
+            cleaned = parts[0].strip()
+            return cleaned if cleaned else text
+        return text
+
     def _get_hash(self, text: str) -> str:
-        return hashlib.sha256(text.encode()).hexdigest()
+        cleaned_text = self._clean_query(text)
+        return hashlib.sha256(cleaned_text.encode()).hexdigest()
 
     async def get_cached_response(self, query: str) -> Optional[str]:
         """Поиск ответа: сначала L1 (строгое совпадение), затем L2 (семантика)."""
-        query_hash = self._get_hash(query)
+        # Чистим запрос перед вычислением хэша и эмбеддинга
+        cleaned_query = self._clean_query(query)
+        query_hash = self._get_hash(cleaned_query)
         
         # --- 1. Проверка L1 (SQLite) ---
         try:
@@ -73,23 +84,21 @@ class CacheManager:
             if self.l2_table_name not in self.db.table_names():
                 return None
 
-            # Запрашиваем вектор входящего запроса у Ollama через переданную сигнатуру метода
-            query_vector = await self.embedding_func(query)
+            # Эмбеддинг берется только от контентной части
+            query_vector = await self.embedding_func(cleaned_query)
             if not query_vector:
                 return None
 
             table = self.db.open_table(self.l2_table_name)
-            # Ищем ближайший вектор вопроса
             results = table.search(query_vector).limit(1).to_pandas()
             
             if not results.empty:
-                # Извлекаем дистанцию. Чем ближе к 0, тем точнее совпадение
                 distance = results.iloc[0].get('_distance', 1.0)
                 if distance < 0.15:  # Жесткий порог точности > 95% сходства
                     agent_logger.info(f"CacheManager", f"L2 Hit (Semantic)! Дистанция: {distance:.4f}")
                     return results.iloc[0]['response']
                 else:
-                    agent_logger.info(f"CacheManager", f"L2 Miss. Ближайший вектор слишком далеко (дистанция: {distance:.4f})")
+                    agent_logger.info(f"CacheManager", f"L2 Miss. Ближайший vector слишком далеко (дистанция: {distance:.4f})")
         except Exception as e:
             agent_logger.error("CacheManager", f"L2 Search Error: {e}")
             
@@ -97,14 +106,15 @@ class CacheManager:
 
     async def save_to_cache(self, query: str, response: str) -> None:
         """Сохранение ответа в L1 и L2."""
-        query_hash = self._get_hash(query)
+        cleaned_query = self._clean_query(query)
+        query_hash = self._get_hash(cleaned_query)
         
         # --- Сохранение в L1 (SQLite) ---
         try:
             conn = sqlite3.connect(self.sqlite_path)
             conn.execute(
                 "INSERT OR REPLACE INTO cache_l1 (query_hash, query_text, response) VALUES (?, ?, ?)",
-                (query_hash, query, response)
+                (query_hash, cleaned_query, response)
             )
             conn.commit()
             conn.close()
@@ -114,11 +124,11 @@ class CacheManager:
         # --- Сохранение в L2 (LanceDB) ---
         if self.embedding_func:
             try:
-                query_vector = await self.embedding_func(query)
+                query_vector = await self.embedding_func(cleaned_query)
                 if query_vector:
                     new_data = pd.DataFrame([{
                         "vector": query_vector,
-                        "query_text": query,
+                        "query_text": cleaned_query,
                         "response": response
                     }])
                     
@@ -131,6 +141,6 @@ class CacheManager:
                 agent_logger.error("CacheManager", f"L2 Save Error: {e}")
 
 
-# Инициализируем синглтон. Привязка llm.get_embedding произойдет при старте ядра
+# Инициализируем синглтон
 from src.cognitive.llm_service import llm
 cache_manager = CacheManager(embedding_func=llm.get_embedding)

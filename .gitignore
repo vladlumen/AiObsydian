@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 venv/
 .env
+*.env
 .venv
 env/
 *.swp
@@ -22,13 +23,14 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
-# === Infrastructure & Monitoring Caches ===
-monitoring/
+# === LanceDB & Project Data ===
+.lancedb/
 data/lancedb_store/
 data/temp_media/*
 !data/temp_media/.gitkeep
 
-# === Logs & Telemetry ===
+# === Logs, Telemetry & Drafts ===
 *.log
 logs/
 telemetry_data/
+_old_drafts/

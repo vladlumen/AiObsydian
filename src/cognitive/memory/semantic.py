@@ -6,12 +6,11 @@ from src.cognitive.llm_service import llm
 from src.core.config import LANCEDB_DIR
 from src.infrastructure.logger import agent_logger
 from src.agents.parsers.md_chunker import MarkdownChunker
-from src.infrastructure.cache_manager import CacheManager
+# CacheManager здесь больше не нужен для генерации заметок
 
 class SemanticMemory:
     def __init__(self):
         self.store = VectorStore(db_dir=str(LANCEDB_DIR))
-        self.cache = CacheManager()
         self.table_name = "semantic_memory"
         self._chunker = MarkdownChunker()
         print("🧠 [SemanticMemory] Высокоуровневая память связана с LanceDB.")
@@ -20,7 +19,7 @@ class SemanticMemory:
         """Полная инкрементальная синхронизация Vault → LanceDB + SQLite реестр."""
         print(f"🔄 [SemanticMemory] Сканирование хранилища Obsidian: {vault_path}")
         if not vault_path.exists():
-            print(f"⚠️ [SemanticMemory] Путь {vault_path} не найден! Синхрониint пропущена.")
+            print(f"⚠️ [SemanticMemory] Путь {vault_path} не найден! Синхронизация пропущена.")
             return
 
         from src.agents.sync_worker import sync_worker
@@ -45,15 +44,13 @@ class SemanticMemory:
         agent_logger.info("SemanticMemory", f"Проиндексировано чанков: {len(parsed_chunks)} ({file_path.name})")
 
     async def search(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        return await self.retrieve_context(query_text, limit=topint_k)
+        return await self.retrieve_context(query_text, limit=top_k)
 
-    async def search_relevant_context(self, query: str, top_k:int = 5) -> List[Dict[str, Any]]:
-        """Алиас для тестов и обратной совместимости."""
+    async def search_relevant_context(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         return await self.retrieve_context(query, limit=top_k)
 
     async def memorize_note(self, note_id: str, content: str, metadata: dict = None):
-        """Индексирует произвольный текст под виртуальным id (без файла на диске)."""
-        parsed_chunks = self._chunk_chunker.parse_file(file_path=note_id, content=content)
+        parsed_chunks = self._chunker.parse_file(file_path=note_id, content=content)
         if metadata:
             for chunk in parsed_chunks:
                 chunk["metadata"].update(metadata)
@@ -74,29 +71,31 @@ class SemanticMemory:
         try:
             return await llm.get_embedding(text)
         except Exception as e:
-            agent_logger.error(
-                "SemanticMemory",
-                f"Ollama Embedding ❌ Ошибка: Не удалось получить вектор для текста: {e}",
-            )
+            agent_logger.error("SemanticMemory", f"Ollama Embedding ❌ Ошибка: {e}")
             return []
 
+    def _clean_text_from_instructions(self, text: str) -> str:
+        """Отрезает хвост инструкций, оставляя чистый контент для RAG поиска связей."""
+        if "Инструкция по обработке:" in text:
+            parts = text.split("Инструкция по обработке:")
+            cleaned = parts[0].strip()
+            return cleaned if cleaned else text
+        return text
+
     async def retrieve_context(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
-        query_vector = await self._get_embedding(query)
+        # ЗАЩИТА RAG: Поиск связей идет строго по контенту поста, без команд middleware
+        cleaned_query = self._clean_text_from_instructions(query)
+        
+        query_vector = await self._get_embedding(cleaned_query)
         if not query_vector:
             return []
         chunks = await self.store.search_hybrid(
-            query_text=query,
+            query_text=cleaned_query,
             query_vector=query_vector,
             limit=limit,
         )
         return chunks
 
-    async def get_cached_response(self, query: str) -> Optional[str]:
-        """Проверка кэша L1/L2 перед тяжелым поиском."""
-        return await self.cache.get_cached_response(query)
-
-    async def save_to_cache(self, query: str, response: str) -> None:
-        """Сохранение нового ответа в кэш."""
-        await self.cache.save_to_cache(query, response)
+    # Методы кэширования get_cached_response и save_to_cache полностью удалены
 
 memory = SemanticMemory()

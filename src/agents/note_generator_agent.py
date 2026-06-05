@@ -76,8 +76,7 @@ class NoteGeneratorAgent:
             if file_path:
                 base_name = os.path.basename(file_path).replace(".md", "")
                 
-                # КРИТИЧЕСКИЙ ФИКС: Исключаем текущую заметку из списка связей,
-                # чтобы модель не зацикливала промпт внутри собственного контента.
+                # Исключаем текущую заметку из списка связей
                 if current_title and current_title.lower() in base_name.lower():
                     continue
                     
@@ -86,14 +85,14 @@ class NoteGeneratorAgent:
         return ", ".join(titles) if titles else "Связанных заметок не найдено."
 
     async def process_text(self, event: TextReceivedEvent):
-        """LLM-структурирование входящего текста и запись заметки в Obsidian Vault."""
+        """LLM-структурирование входящего текста и запись заметки в Obsidian Vault без кэширования."""
         raw_text = event.text.strip()
         from src.core.orchestrator import is_rag_query
 
         if not raw_text or is_rag_query(raw_text):
             return
 
-        # === ТОТАЛЬНАЯ ЗАЩИТА НА ВХОДЕ (ДО КЭША) ===
+        # === ТОТАЛЬНАЯ ЗАЩИТА НА ВХОДЕ ===
         if len(raw_text) < 150 and any(word in raw_text.lower() for word in ["ты", "задача", "промпт", "архитектор"]):
             logger.warning(f"[NoteGeneratorAgent] 🛑 Входной фильтр отклонил мусорный/битый OCR-текст ({len(raw_text)} симв.). Пайплайн остановлен.")
             return
@@ -104,109 +103,78 @@ class NoteGeneratorAgent:
         from src.agents.obsidian_writer import writer
         from src.agents.parsers.url_parser import url_parser
         from src.interfaces.telegram.bot import bot
-        from src.infrastructure.cache_manager import cache_manager
 
         current_date = datetime.now().strftime("%Y-%m-%d")
 
         try:
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-            # Санитаризация строки для кэша
-            clean_cache_key = " ".join(raw_text.split()).strip()
+            # Контекстный запрос и поиск связей в LanceDB
+            context_query = raw_text[:500]
+            old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
+            available_links = "Связанных заметок не найдено."
 
-            # --- ИНТЕГРАЦИЯ КЭША (Intercept) ---
-            cached_response = await cache_manager.get_cached_response(clean_cache_key)
-            if cached_response:
-                logger.info(f"[NoteGeneratorAgent] Попадание в кэш для запроса пользователя.")
-                llm_response = cached_response
+            async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
+                chunks = await memory.retrieve_context(context_query, limit=3)
+                old_context_block = self._format_old_context_block(chunks)
+                available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
+
+            url = self._extract_url(raw_text)
+
+            if url:
+                user_comment = URL_PATTERN.sub("", raw_text).strip() or "—"
+                async with telemetry.track(f"Note_URL_Fetch_{event.user_id}"):
+                    article_text = await asyncio.to_thread(url_parser.extract_text, url)
+
+                system_prompt = prompt_loader.get(
+                    "generate_web_note_prompt",
+                    old_context_block=old_context_block,
+                    available_links=available_links,
+                    current_date=current_date,
+                    user_comment=user_comment,
+                    url=url,
+                )
+                user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
             else:
-                # Cache Miss: Полный конвейер извлечения и инференса
-                context_query = raw_text[:500]
-                old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
-                available_links = "Связанных заметок не найдено."
+                system_prompt = prompt_loader.get(
+                    "generate_note_prompt",
+                    old_context_block=old_context_block,
+                    available_links=available_links,
+                    current_date=current_date,
+                )
+                user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
 
-                async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
-                    chunks = await memory.retrieve_context(context_query, limit=3)
-                    old_context_block = self._format_old_context_block(chunks)
-                    available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
-
-                url = self._extract_url(raw_text)
-
-                if url:
-                    user_comment = URL_PATTERN.sub("", raw_text).strip() or "—"
-                    async with telemetry.track(f"Note_URL_Fetch_{event.user_id}"):
-                        article_text = await asyncio.to_thread(url_parser.extract_text, url)
-
-                    system_prompt = prompt_loader.get(
-                        "generate_web_note_prompt",
-                        old_context_block=old_context_block,
-                        available_links=available_links,
-                        current_date=current_date,
-                        user_comment=user_comment,
-                        url=url,
-                    )
-                    user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
-                else:
-                    system_prompt = prompt_loader.get(
-                        "generate_note_prompt",
-                        old_context_block=old_context_block,
-                        available_links=available_links,
-                        current_date=current_date,
-                    )
-                    user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
-
-                async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
-                    async with vram_manager.inference_lock:
-                        await vram_manager.request_model(config.CURRENT_LLM_MODEL)
-                        try:
-                            llm_response = await llm.generate_text(
-                                user_payload,
-                                system_prompt=system_prompt,
-                                model=config.CURRENT_LLM_MODEL,
-                            )
-                        finally:
-                            await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
-
-                if llm_response and llm_response.strip():
-                    await cache_manager.save_to_cache(clean_cache_key, llm_response)
+            # Прямой инференс на GPU (Без проверки кэша)
+            async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
+                async with vram_manager.inference_lock:
+                    await vram_manager.request_model(config.CURRENT_LLM_MODEL)
+                    try:
+                        llm_response = await llm.generate_text(
+                            user_payload,
+                            system_prompt=system_prompt,
+                            model=config.CURRENT_LLM_MODEL,
+                        )
+                    finally:
+                        await vram_manager.unload_model(config.CURRENT_LLM_MODEL)
 
             if not llm_response or not llm_response.strip():
                 await bot.send_message(chat_id=event.user_id, text="⚠️ Модель не смогла сформировать заметку.")
                 return
 
-            # Парсинг структурированного ответа (из кэша или свежей генерации)
+            # Парсинг структурированного ответа
             properties, title, content = self._parse_llm_response(llm_response)
 
-            # === БЛОК АВТО-ОЧИСТКИ КЭША ПРИ ОБНАРУЖЕНИИ БРЕДА ===
+            # Перехват галлюцинаций модели (вывод ошибки пользователю без очистки баз, так как кэша больше нет)
             if title and any(bad_word in title.lower() for bad_word in ["всемирной паутины", "системный архитектор обнаружил"]):
-                logger.warning(f"[NoteGeneratorAgent] 🚨 Обнаружен бред модели в ответе! Стираем этот хэш из кэша L1/L2.")
-                
-                query_hash = cache_manager._get_hash(clean_cache_key)
-                try:
-                    # Чистим L1 (SQLite)
-                    conn = sqlite3.connect(cache_manager.sqlite_path)
-                    conn.execute("DELETE FROM cache_l1 WHERE query_hash = ?", (query_hash,))
-                    conn.commit()
-                    conn.close()
-                    
-                    # Чистим L2 (LanceDB)
-                    if cache_manager.l2_table_name in cache_manager.db.table_names():
-                        table = cache_manager.db.open_table(cache_manager.l2_table_name)
-                        table.delete(f"query_text = '{clean_cache_key}'")
-                        
-                    logger.info(f"[NoteGeneratorAgent] 🔥 Базы кэша успешно очищены от отравленного хэша.")
-                except Exception as cache_del_err:
-                    logger.error(f"Не удалось вычистить плохой кэш: {cache_del_err}")
-                
+                logger.warning(f"[NoteGeneratorAgent] 🚨 Обнаружен бред модели в ответе! Генерация отклонена.")
                 await bot.send_message(
                     chat_id=event.user_id, 
-                    text="⚠️ Модель выдала некорректный галлюцинаторный ответ. Локальный кэш зачищен. Отправьте запрос повторно."
+                    text="⚠️ Модель выдала некорректный галлюцинаторный ответ. Отправьте запрос повторно для чистой перегенерации."
                 )
                 return
 
             if title:
                 title = title.strip().replace('"', '').replace("'", "")
-                # Двойной Fail-Safe: обрезка по словам
                 if len(title) > 70:
                     title = " ".join(title.split()[:8]) + "..."
                 title = f"{current_date} {title}"
@@ -221,7 +189,7 @@ class NoteGeneratorAgent:
                 content = content.replace("> ![abstract] Резюме", "").replace("!abstract Резюме", "").strip()
                 content = content.lstrip(">").lstrip("!").replace("abstract]", "").strip()
             
-            # Формируем гарантированный Callout-блок Obsidian на основе маркеров
+            # Формируем гарантированный Callout-блок Obsidian
             target_marker = None
             if "## Извлеченные факты" in content:
                 target_marker = "## Извлеченные факты"
