@@ -1,5 +1,3 @@
-import asyncio
-
 from src.infrastructure.logger import logger
 from src.infrastructure.telemetry import telemetry
 from src.infrastructure.event_bus import VoiceReceivedEvent, TextReceivedEvent, bus
@@ -16,7 +14,7 @@ class VoiceAgent:
             logger.error(f"[VoiceAgent] Аудиофайл не найден: {audio_path}")
             return
 
-        from src.cognitive.stt_service import stt
+        from src.cognitive.stt_service import voice_service
         from src.interfaces.telegram.bot import bot
 
         try:
@@ -24,7 +22,7 @@ class VoiceAgent:
 
             transcribed_text = ""
             async with telemetry.track(f"STT_Transcribe_{event.user_id}"):
-                transcribed_text = await asyncio.to_thread(stt.transcribe, audio_path)
+                transcribed_text = await voice_service.transcribe(audio_path)
 
             if transcribed_text and transcribed_text.strip():
                 logger.info(

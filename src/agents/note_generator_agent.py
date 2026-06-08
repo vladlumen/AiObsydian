@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import sqlite3
 from datetime import datetime
 
 from src.infrastructure.logger import logger
@@ -109,8 +108,18 @@ class NoteGeneratorAgent:
         try:
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-            # Контекстный запрос и поиск связей в LanceDB
-            context_query = raw_text[:500]
+            # ШАГ 1: ОЧИСТКА ПОИСКОВОГО ЗАПРОСА
+            clean_query = raw_text
+            # Удаляем технические маркеры интерфейса Instagram/TikTok, которые ломают векторный поиск
+            noise_words = [
+                "stillvasilisa", "itsretych", "Войдите, чтобы", "Нравится", 
+                "прокомментировать", "Посмотреть все", "комментарии", "3 939", "270", "1 дн."
+            ]
+            for word in noise_words:
+                clean_query = clean_query.replace(word, "")
+            
+            # Берем первые 300 чистых символов OCR для контекстного поиска в LanceDB
+            context_query = clean_query.strip()[:300]
             old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
             available_links = "Связанных заметок не найдено."
 
@@ -119,32 +128,39 @@ class NoteGeneratorAgent:
                 old_context_block = self._format_old_context_block(chunks)
                 available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
 
+            system_prompt = prompt_loader.get(
+                "generate_note_prompt",
+                old_context_block=old_context_block,
+                available_links=available_links,
+                current_date=current_date,
+            )
+            user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
+
             url = self._extract_url(raw_text)
 
             if url:
                 user_comment = URL_PATTERN.sub("", raw_text).strip() or "—"
                 async with telemetry.track(f"Note_URL_Fetch_{event.user_id}"):
-                    article_text = await asyncio.to_thread(url_parser.extract_text, url)
+                    try:
+                        article_text = await url_parser.extract_text(url)
+                    except Exception as url_err:
+                        logger.warning(f"[NoteGeneratorAgent] ⚠️ Не удалось спарсить контент по ссылке {url}: {url_err!r}")
+                        article_text = None
 
-                system_prompt = prompt_loader.get(
-                    "generate_web_note_prompt",
-                    old_context_block=old_context_block,
-                    available_links=available_links,
-                    current_date=current_date,
-                    user_comment=user_comment,
-                    url=url,
-                )
-                user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
-            else:
-                system_prompt = prompt_loader.get(
-                    "generate_note_prompt",
-                    old_context_block=old_context_block,
-                    available_links=available_links,
-                    current_date=current_date,
-                )
-                user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
+                if article_text and article_text.strip():
+                    system_prompt = prompt_loader.get(
+                        "generate_web_note_prompt",
+                        old_context_block=old_context_block,
+                        available_links=available_links,
+                        current_date=current_date,
+                        user_comment=user_comment,
+                        url=url,
+                    )
+                    user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
+                else:
+                    user_payload = f"<NEW_DATA>\nСсылка: {url}\nКомментарий пользователя: {user_comment}\n(Примечание: контент страницы недоступен для парсера, обработай только комментарий и ссылку)\n</NEW_DATA>"
 
-            # Прямой инференс на GPU (Без проверки кэша)
+            # Прямой инференс на GPU
             async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
                 async with vram_manager.inference_lock:
                     await vram_manager.request_model(config.CURRENT_LLM_MODEL)
@@ -164,7 +180,6 @@ class NoteGeneratorAgent:
             # Парсинг структурированного ответа
             properties, title, content = self._parse_llm_response(llm_response)
 
-            # Перехват галлюцинаций модели (вывод ошибки пользователю без очистки баз, так как кэша больше нет)
             if title and any(bad_word in title.lower() for bad_word in ["всемирной паутины", "системный архитектор обнаружил"]):
                 logger.warning(f"[NoteGeneratorAgent] 🚨 Обнаружен бред модели в ответе! Генерация отклонена.")
                 await bot.send_message(
@@ -173,13 +188,21 @@ class NoteGeneratorAgent:
                 )
                 return
 
+            # --- ФИКС ЗАГОЛОВКА СТАРТ ---
             if title:
-                title = title.strip().replace('"', '').replace("'", "")
-                if len(title) > 70:
-                    title = " ".join(title.split()[:8]) + "..."
+                # Очищаем от кавычек, двоеточий, точек и троеточий
+                title = title.strip()
+                title = re.sub(r'[\'":\.]', '', title)
+                title = title.replace('...', '').strip()
+                
+                # Принудительное ограничение длины по символам (не длиннее 55 знаков для лаконичности)
+                if len(title) > 55:
+                    title = title[:52].strip() + "..."
+                
                 title = f"{current_date} {title}"
             else:
                 title = f"{current_date} Заметка"
+            # --- ФИКС ЗАГОЛОВКА КОНЕЦ ---
 
             if not content:
                 content = llm_response.strip()

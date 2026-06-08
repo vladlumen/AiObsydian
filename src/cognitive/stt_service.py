@@ -12,17 +12,26 @@ class STTService:
         """Ленивая загрузка модели в память при первом обращении."""
         if self.model is None:
             print(f"[STTService] ⏳ Инициализация модели Whisper ({self.model_size})...")
-            # compute_type="float16" сильно экономит видеопамять без потери качества
-            self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+            # compute_type="int8" сильно экономит видеопамять без потери качества
+            # local_files_only=True предотвращает сетевые задержки при проверке весов HF
+            self.model = WhisperModel(
+                self.model_size, 
+                device="cpu", 
+                compute_type="int8",
+                local_files_only=True
+            )
 
-    def transcribe(self, audio_path: Path) -> str:
+    async def transcribe(self, audio_path: Path) -> str:
         """Переводит аудио в текст."""
         self._load_model()
         
         print(f"[STTService] 🎙️ Распознаю аудио: {audio_path.name}...")
         
-        # Запускаем транскрибацию (beam_size=5 дает отличный баланс скорости/качества)
-        segments, info = self.model.transcribe(str(audio_path), beam_size=5, language="ru")
+        # Запускаем транскрибацию в отдельном потоке, чтобы не блокировать event loop
+        import asyncio
+        segments, info = await asyncio.to_thread(
+            lambda: self.model.transcribe(str(audio_path), beam_size=5, language="ru")
+        )
         
         print(f"[STTService] ℹ️ Язык определен: {info.language} (вероятность {info.language_probability:.2f})")
         
@@ -34,4 +43,4 @@ class STTService:
         return " ".join(full_text).strip()
 
 # Экземпляр для импорта
-stt = STTService()
+voice_service = STTService()

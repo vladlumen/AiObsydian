@@ -64,7 +64,7 @@ class LLMService:
             print(f"[LLMService] ❌ Ошибка генерации текста через /api/generate: {e}")
             return ""
 
-    async def analyze_image(self, image_path: Path, prompt: str, system_prompt: str = "", model_name: str = "llama3.2-vision") -> str:
+    async def analyze_image(self, image_path: Path, prompt: str, system_prompt: str = "", model_name: str = "llava") -> str:
         print(f"[LLMService] 👁️ Подготовка изображения {image_path.name}...")
         
         with Image.open(image_path) as img:

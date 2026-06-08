@@ -9,5 +9,5 @@ MODEL_REGISTRY = {
     "hermes3:8b": ModelProfile(vram_required_mb=8500),
     "qwen3.5:latest": ModelProfile(vram_required_mb=6500),
     "qwen3.5:9b": ModelProfile(vram_required_mb=6500),
-    "llama3.2-vision": ModelProfile(vram_required_mb=10000)
+    "llava": ModelProfile(vram_required_mb=10000)
 }

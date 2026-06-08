@@ -19,6 +19,17 @@ class VectorStore:
         self.db = lancedb.connect(self.db_dir)
         self.table_name = "semantic_memory"
         self.table = self._get_or_create_table()
+        
+        # Единое SQL-условие для жесткой фильтрации технического мусора, инбокса и тестов
+        self.exclude_condition = (
+            "NOT ("
+            "file_path LIKE '%Test%' OR "
+            "file_path LIKE '%test_%' OR "
+            "file_path LIKE '%tests/%' OR "
+            "file_path LIKE '%Template%' OR "
+            "file_path LIKE '%00_Inbox%'"
+            ")"
+        )
 
     def _get_or_create_table(self):
         if self.table_name in self.db.table_names():
@@ -163,11 +174,23 @@ class VectorStore:
         return normalized
 
     async def search(self, query_vector: list, limit: int = 5) -> List[Dict[str, Any]]:
-        arrow = self.table.search(query_vector).limit(limit).to_arrow()
+        # Добавлен .where() для фильтрации фолбэк/базового поиска
+        arrow = (
+            self.table.search(query_vector)
+            .where(self.exclude_condition)
+            .limit(limit)
+            .to_arrow()
+        )
         return self._normalize_search_results(arrow)
 
     async def _vector_search_raw(self, query_vector: List[float], limit: int) -> Any:
-        return self.table.search(query_vector).limit(limit).to_arrow()
+        # Добавлен .where() во внутренний сырой метод для консистентности результатов
+        return (
+            self.table.search(query_vector)
+            .where(self.exclude_condition)
+            .limit(limit)
+            .to_arrow()
+        )
 
     async def search_hybrid(self, query_text: str, query_vector: List[float], limit: int = 5) -> List[Dict[str, Any]]:
         """
@@ -183,11 +206,10 @@ class VectorStore:
                 self.table.search(query_type="hybrid")
                 .vector(query_vector)
                 .text(query_text)
-                .where("NOT (file_path LIKE '%tests/%' OR file_path LIKE '%test_%')") # Исключаем тестовый мусор
+                .where(self.exclude_condition) # Применение расширенной SQL-фильтрации путей
                 .rerank(reranker=reranker)
                 .limit(limit)
             )
-            # to_arrow().to_pylist() стабильнее, чем to_list() между версиями LanceDB
             raw = query.to_arrow()
             formatted = self._normalize_search_results(raw)
             if formatted:

@@ -96,6 +96,14 @@ class SemanticMemory:
         )
         return chunks
 
-    # Методы кэширования get_cached_response и save_to_cache полностью удалены
+    async def get_cached_response(self, query: str) -> Optional[str]:
+        """L1/L2 кэш ответов RAG — делегирует в CacheManager."""
+        from src.infrastructure.cache_manager import cache_manager
+        return await cache_manager.get_cached_response(query)
+
+    async def save_to_cache(self, query: str, response: str) -> None:
+        """Сохранение ответа RAG в L1/L2 — делегирует в CacheManager."""
+        from src.infrastructure.cache_manager import cache_manager
+        await cache_manager.save_to_cache(query, response)
 
 memory = SemanticMemory()
