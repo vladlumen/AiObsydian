@@ -31,7 +31,7 @@ from src.models.registry import MODEL_REGISTRY
 
 AVAILABLE_MODELS = {
     "hermes": "hermes3:8b",
-    "qwen": "qwen3.5:9b"
+   
 }
 
 CURRENT_LLM_MODEL = AVAILABLE_MODELS["hermes"]

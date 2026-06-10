@@ -1,5 +1,4 @@
 # src/agents/vision_agent.py
-# Шапка файла абсолютно пустая
 
 class VisionAgent:
     def __init__(self):
@@ -31,7 +30,8 @@ class VisionAgent:
                 prompt = base_prompt
 
             ocr_result = ""
-            model_name = "llava"
+            # Исправлено: запрашиваем правильную модель из реестра VRAM
+            model_name = "qwen3-vl:8b" 
             
             async with telemetry.track(f"Vision_Inference_{event.user_id}"):
                 async with vram_manager.inference_lock:
@@ -47,7 +47,8 @@ class VisionAgent:
                 
                 text_event = TextReceivedEvent(
                     user_id=event.user_id,
-                    text=clean_ocr
+                    text=clean_ocr,
+                    is_ocr=True  # Передаем маркер происхождения текста
                 )
                 await bus.publish(text_event)
             else:
@@ -55,7 +56,7 @@ class VisionAgent:
                 await bot.send_message(chat_id=event.user_id, text="⚠️ Не удалось распознать текст на изображении.")
 
         except Exception as e:
-            logger.error(f"[VisionAgent ❌ Ошибка выполнения пайплайна]: {repr(e)}")
+            logger.error(f"[VisionAgent] ❌ Ошибка выполнения пайплайна: {repr(e)}")
             try:
                 await bot.send_message(chat_id=event.user_id, text="❌ Произошла ошибка при обработке изображения.")
             except:

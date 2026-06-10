@@ -18,7 +18,7 @@ async def access_control_middleware(handler, event: types.Message, data: dict):
     return
 
 
-# 3. Middleware для буферизации и склейки сообщений
+# 3. Middleware для буферизации и склейки сообщений (Атомарная сборка пачек)
 class MessageBulkMiddleware(BaseMiddleware):
     def __init__(self, latency: float = 1.5):
         self.latency = latency
@@ -32,21 +32,32 @@ class MessageBulkMiddleware(BaseMiddleware):
 
         user_id = event.from_user.id
         
+        # Защищаем инициализацию структуры данных для пользователя
         if user_id not in self.storage:
             self.storage[user_id] = []
             self.locks[user_id] = asyncio.Lock()
 
+        # Шаг 1: Атомарно добавляем сообщение в очередь
         async with self.locks[user_id]:
             self.storage[user_id].append(event)
             
+        # Даем время на досылку медиагрупп или пачки сообщений
         await asyncio.sleep(self.latency)
 
+        # Шаг 2: Проверяем, является ли текущая задача последней в пачке
         async with self.locks[user_id]:
-            if not self.storage[user_id] or self.storage[user_id][-1] != event:
-                return  
+            if user_id not in self.storage or not self.storage[user_id]:
+                return  # Пачка уже обработана параллельным таском
 
-            bulk = self.storage.pop(user_id)
+            if self.storage[user_id][-1] != event:
+                return  # Пришли новые сообщения, текущий таск уступает им дорогу
+
+            # Если мы последние в списке — забираем всю накопленную пачку
+            bulk = self.storage.pop(user_id, [])
             self.locks.pop(user_id, None)
+
+        if not bulk:
+            return
 
         forwarded_texts = []
         user_commands = []
@@ -69,8 +80,7 @@ class MessageBulkMiddleware(BaseMiddleware):
         if not combined_text:
             return await handler(event, data)
 
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Не мутируем frozen объект event.
-        # Передаем склеенный текст в data. Хэндлер в handlers.py должен забирать его отсюда.
+        # Передаем склеенный текст в data. Хэндлер заберет его отсюда.
         data["combined_text"] = combined_text
         
         return await handler(event, data)
@@ -87,3 +97,11 @@ async def start_telegram_bot():
     print("🤖 [TelegramBot] Бот запущен. Слушаю сообщения...")
     await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot)
+
+
+# Точка входа для запуска бота из консоли/скрипта
+if __name__ == "__main__":
+    try:
+        asyncio.run(start_telegram_bot())
+    except (KeyboardInterrupt, SystemExit):
+        print("\n🤖 [TelegramBot] Бот остановлен вручную.")

@@ -15,6 +15,7 @@ class VoiceReceivedEvent:
 class TextReceivedEvent:
     user_id: int
     text: str
+    is_ocr: bool = False  # ИСПРАВЛЕНО: Маркер происхождения текста для защиты от коллизий RAG
 
 @dataclass
 class ModelReadyEvent:

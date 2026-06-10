@@ -14,7 +14,7 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 
 class NoteGeneratorAgent:
     def __init__(self):
-        pass
+        self.max_title_len = 55
 
     def _parse_llm_response(self, raw: str) -> tuple[str, str, str]:
         """Извлекает PROPERTIES, TITLE и CONTENT из ответа Hermes."""
@@ -83,6 +83,21 @@ class NoteGeneratorAgent:
                 
         return ", ".join(titles) if titles else "Связанных заметок не найдено."
 
+    def _detect_dynamic_tags(self, text: str) -> str:
+        """Лингвистический анализатор контента для автоматической генерации тегов."""
+        normalized = text.lower()
+        tags = []
+
+        # Триггеры для киноиндустрии
+        if any(w in normalized for w in ["фильм", "кино", "комедия", "боевик", "режиссер", "сериал", "актер", "сценарий"]):
+            tags.append("кино")
+        
+        # Триггеры для IT контента
+        if any(w in normalized for w in ["python", "api", "vram", "gpu", "код", "баг", "wsl", "docker", "git"]):
+            tags.append("it")
+
+        return ", ".join(tags) if tags else ""
+
     async def process_text(self, event: TextReceivedEvent):
         """LLM-структурирование входящего текста и запись заметки в Obsidian Vault без кэширования."""
         raw_text = event.text.strip()
@@ -108,9 +123,8 @@ class NoteGeneratorAgent:
         try:
             await bot.send_chat_action(chat_id=event.user_id, action="typing")
 
-            # ШАГ 1: ОЧИСТКА ПОИСКОВОГО ЗАПРОСА
+            # ШАГ 1: ОЧИСТКА ПОИСКОВОГО ЗАПРОСА ОТ ШУМА ИНТЕРФЕЙСОВ
             clean_query = raw_text
-            # Удаляем технические маркеры интерфейса Instagram/TikTok, которые ломают векторный поиск
             noise_words = [
                 "stillvasilisa", "itsretych", "Войдите, чтобы", "Нравится", 
                 "прокомментировать", "Посмотреть все", "комментарии", "3 939", "270", "1 дн."
@@ -118,23 +132,42 @@ class NoteGeneratorAgent:
             for word in noise_words:
                 clean_query = clean_query.replace(word, "")
             
-            # Берем первые 300 чистых символов OCR для контекстного поиска в LanceDB
+            # Берем чистые символы для контекстного поиска в LanceDB
             context_query = clean_query.strip()[:300]
             old_context_block = "<OLD_CONTEXT>\n(пусто)\n</OLD_CONTEXT>"
             available_links = "Связанных заметок не найдено."
 
-            async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
-                chunks = await memory.retrieve_context(context_query, limit=3)
-                old_context_block = self._format_old_context_block(chunks)
-                available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
+            # КРИТИЧЕСКИЙ ФИКС: Если это OCR-текст, изолируем контекст RAG,
+            # чтобы старые кривые фильмы из базы не ломали генерацию новой карточки.
+            if getattr(event, "is_ocr", False):
+                old_context_block = "<OLD_CONTEXT>\n(Контекст изолирован во избежание коллизий)\n</OLD_CONTEXT>"
+                available_links = "Связанных заметок не найдено."
+            else:
+                async with telemetry.track(f"Note_Retrieve_Context_{event.user_id}"):
+                    chunks = await memory.retrieve_context(context_query, limit=3)
+                    old_context_block = self._format_old_context_block(chunks)
+                    available_links = self._extract_clean_titles(chunks, current_title=raw_text[:30])
 
+            # Вычисляем динамические теги перед загрузкой промпта
+            dynamic_tags = self._detect_dynamic_tags(raw_text)
+
+            # Загружаем базовый системный промпт с передачей dynamic_tags
             system_prompt = prompt_loader.get(
                 "generate_note_prompt",
                 old_context_block=old_context_block,
                 available_links=available_links,
                 current_date=current_date,
+                dynamic_tags=dynamic_tags,
             )
-            user_payload = f"<NEW_DATA>\n{raw_text}\n</NEW_DATA>"
+            
+            # КРИТИЧЕСКИЙ ФИКС: Строгое изолирование сырых данных в XML-структуру
+            user_payload = (
+                f"<DATA_PAYLOAD>\n"
+                f"CURRENT_METADATA_DATE: {current_date}\n"
+                f"SOURCE_MATERIAL_RAW_TEXT:\n"
+                f"\"\"\"\n{raw_text}\n\"\"\"\n"
+                f"</DATA_PAYLOAD>"
+            )
 
             url = self._extract_url(raw_text)
 
@@ -158,7 +191,13 @@ class NoteGeneratorAgent:
                     )
                     user_payload = f"<ARTICLE_TEXT>\n{article_text.strip()}\n</ARTICLE_TEXT>"
                 else:
-                    user_payload = f"<NEW_DATA>\nСсылка: {url}\nКомментарий пользователя: {user_comment}\n(Примечание: контент страницы недоступен для парсера, обработай только комментарий и ссылку)\n</NEW_DATA>"
+                    user_payload = (
+                        f"<NEW_DATA>\n"
+                        f"Ссылка: {url}\n"
+                        f"Комментарий пользователя: {user_comment}\n"
+                        f"(Примечание: контент страницы недоступен, обработай только этот комментарий)\n"
+                        f"</NEW_DATA>"
+                    )
 
             # Прямой инференс на GPU
             async with telemetry.track(f"Note_LLM_Inference_{event.user_id}"):
@@ -190,14 +229,20 @@ class NoteGeneratorAgent:
 
             # --- ФИКС ЗАГОЛОВКА СТАРТ ---
             if title:
-                # Очищаем от кавычек, двоеточий, точек и троеточий
                 title = title.strip()
-                title = re.sub(r'[\'":\.]', '', title)
+                # Удаляем мусорные знаки препинания и кавычки
+                title = re.sub(r'[\'":\.\«\»\“\”]', '', title)
                 title = title.replace('...', '').strip()
                 
-                # Принудительное ограничение длины по символам (не длиннее 55 знаков для лаконичности)
-                if len(title) > 55:
-                    title = title[:52].strip() + "..."
+                # Фильтр описательного шума: убираем слова "фильм", "кино", если модель добавила их в заголовок
+                title = re.sub(r'\b(фильм|кино|краткая суть|заметка)\b', '', title, flags=re.IGNORECASE).strip()
+                
+                # Схлопываем лишние пробелы, если они образовались после чистки
+                title = re.sub(r'\s+', ' ', title)
+
+                # Принудительное ограничение длины по символам
+                if len(title) > self.max_title_len:
+                    title = title[:self.max_title_len - 3].strip() + "..."
                 
                 title = f"{current_date} {title}"
             else:
@@ -207,12 +252,11 @@ class NoteGeneratorAgent:
             if not content:
                 content = llm_response.strip()
 
-            # Слой нормализации разметки
+            # Слой нормализации разметки Callout-блоков Obsidian
             if "![abstract]" in content or "!abstract" in content:
                 content = content.replace("> ![abstract] Резюме", "").replace("!abstract Резюме", "").strip()
                 content = content.lstrip(">").lstrip("!").replace("abstract]", "").strip()
             
-            # Формируем гарантированный Callout-блок Obsidian
             target_marker = None
             if "## Извлеченные факты" in content:
                 target_marker = "## Извлеченные факты"

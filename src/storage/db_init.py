@@ -1,15 +1,20 @@
 import sqlite3
+from src.core.config import DATA_DIR
 
-DB_NAME = "state.db"
+# Формируем абсолютный путь к единой базе данных
+DB_PATH = DATA_DIR / "state.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    # Гарантируем, что папка data/ существует перед созданием sqlite подключения
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    
+    conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
 
     # Включаем режим WAL для предотвращения блокировок БД
     cursor.execute("PRAGMA journal_mode=WAL;")
 
-    # Таблица задач (должна содержать title)
+    # Таблица задач
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,7 +27,7 @@ def init_db():
     )
     """)
 
-    # Таблица логов (должна содержать level, source, message, meta)
+    # Таблица логов
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS agent_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +50,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print(f"✅ База данных {DB_NAME} успешно инициализирована в режиме WAL.")
+    print(f"✅ База данных {DB_PATH} успешно инициализирована в режиме WAL.")
 
 if __name__ == "__main__":
     init_db()

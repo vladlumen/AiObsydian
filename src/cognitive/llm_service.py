@@ -70,10 +70,11 @@ class LLMService:
         with Image.open(image_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            # ИСПРАВЛЕНИЕ: Оптимизируем разрешение эскиза до 640x640 для ускорения локального OCR
+            img.thumbnail((640, 640), Image.Resampling.LANCZOS)
             
             buffer = BytesIO()
-            img.save(buffer, format="JPEG", quality=85)
+            img.save(buffer, format="JPEG", quality=80)
             base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
         print(f"[LLMService] 🚀 Изображение сжато. Отправляю в {model_name}...")
@@ -93,7 +94,8 @@ class LLMService:
 
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(f"{self.base_url}/api/generate", json=payload, timeout=120.0)
+                # ИСПРАВЛЕНИЕ: Лимит ожидания (timeout) увеличен со 120 до 300 секунд
+                response = await client.post(f"{self.base_url}/api/generate", json=payload, timeout=300.0)
                 response.raise_for_status()
                 return response.json().get("response", "").strip()
         except Exception as e:

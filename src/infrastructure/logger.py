@@ -16,11 +16,12 @@ logging.basicConfig(
 # 2. СОЗДАЕМ ЕДИНЫЙ ОБЪЕКТ ЛОГГЕРА, КОТОРЫЙ ИЩУТ ОРКЕСТРАТОР И ДРУГИЕ МОДУЛИ
 logger = logging.getLogger("AgentCore")
 
-# Сохраняем существующую функциональность LiteFlightRecorder для обратной совместимости
-DB_NAME = "state.db"
+# Динамически вычисляем путь к единой базе данных через конфиг
+from src.core.config import DATA_DIR
+DEFAULT_DB_PATH = str(DATA_DIR / "state.db")
 
 class LiteFlightRecorder:
-    def __init__(self, db_name=DB_NAME):
+    def __init__(self, db_name=DEFAULT_DB_PATH):
         self.db_name = db_name
 
     def _write_to_db(self, level: str, source: str, message: str, meta: dict = None):

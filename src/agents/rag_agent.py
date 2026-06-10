@@ -8,7 +8,7 @@ class RAGAgent:
     def __init__(self):
         pass
 
-    async def process_query(self, event: TextReceived_event):
+    async def process_query(self, event: TextReceivedEvent):
         """Выполнение гибридного RAG-поиска и генерация ответа через Hermes 3."""
         query = event.text.strip().lstrip('?').rstrip('?').strip()
         if not query:

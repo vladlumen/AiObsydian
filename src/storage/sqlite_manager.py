@@ -6,8 +6,11 @@ from typing import Dict, Optional, List, Tuple
 # Настраиваем локальный логгер для модуля
 logger = logging.getLogger("SQLiteManager")
 
+from src.core.config import DATA_DIR
+DEFAULT_DB_PATH = str(DATA_DIR / "state.db")
+
 class SQLiteManager:
-    def __init__(self, db_path: str = "state.db"):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         self.init_db()
 

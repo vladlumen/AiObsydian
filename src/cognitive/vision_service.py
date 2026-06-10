@@ -1,69 +1,120 @@
+# src/cognitive/vision_service.py
+
 import os
 import base64
 import httpx
+from io import BytesIO
+from pathlib import Path
+from PIL import Image
 
 class VisionService:
     def __init__(self):
-        # Оставляем стандартный локальный порт Windows
-        self.ollama_url = "http://127.0.0.1:11434/api/generate"
-        
-        self.model_name = "llava"
+        self.model_name = "qwen3-vl:8b"
+        self.max_side_single = 1600
+        self.max_side_batch = 1024
+
+    def _prepare_image_base64(self, image_path: Path, max_side: int, quality: int) -> str:
+        with Image.open(image_path) as img:
+            if img.mode in ("RGBA", "P"):
+                img = img.convert('RGB')
+            
+            width, height = img.size
+            if width > max_side or height > max_side:
+                img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=quality)
+            return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
     async def analyze_image(self, image_path: os.PathLike, prompt: str) -> str:
-        """ОДНОРОДНЫЙ OCR: Анализ одного скриншота из Телеграма."""
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Файл не найден: {image_path}")
+        """ОДНОРОДНЫЙ OCR: Анализ одного скриншота с подавлением мыслей."""
+        from src.cognitive.llm_service import llm
+        
+        path_obj = Path(image_path)
+        if not path_obj.exists():
+            raise FileNotFoundError(f"Файл не найден: {path_obj}")
 
-        with open(image_path, "rb") as image_file:
-            image_encoded = base64.b64encode(image_file.read()).decode('utf-8')
+        encoded_image = self._prepare_image_base64(path_obj, max_side=self.max_side_single, quality=90)
+
+        # 1. ОБЯЗАТЕЛЬНО ЖЕСТКИЙ СИСТЕМНЫЙ ПРОМПТ ПРОТИВ REASONING LEAKAGE
+        ocr_prompt = (
+            "Return ONLY the final extracted text.\n"
+            "Do not show reasoning.\n"
+            "Do not use internal analysis.\n\n"
+            f"Task: {prompt}"
+        )
+
+        # 4. КРИТИЧЕСКИЙ ТЕСТ: Раскомментируй строку ниже, чтобы проверить чистый пайплайн
+        # ocr_prompt = "Return ONLY one word: OK"
 
         payload = {
             "model": self.model_name,
-            "prompt": prompt,
-            "images": [image_encoded],  # Передаем картинку в массиве
+            "prompt": ocr_prompt,
+            "images": [encoded_image],
             "stream": False,
             "options": {
-                "temperature": 0.2
+                "num_ctx": 4096,
+                "num_predict": 4096,     # 2. УВЕЛИЧЕНО до максимума
+                "temperature": 0.0,
+                "num_gpu": 99,
+                "think": False,          # 3. СПЕЦ-РЕЖИМ для отключения рассуждений Ollama
+                "reasoning": False       # Альтернативный флаг для старых/кастомных сборок
             }
         }
 
-        # Таймаут 120 секунд, чтобы тяжелая модель успела обработать картинку на RTX 3090
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(self.ollama_url, json=payload)
-            if response.status_code == 200:
-                return response.json().get("response", "")
-            else:
-                raise RuntimeError(f"Ollama error: {response.status_code} - {response.text}")
+            response = await client.post(llm.base_url + "/api/generate", json=payload)
+            response.raise_for_status()
+            
+            json_data = response.json()
+            result_text = json_data.get("response", "").strip()
+            
+            # Фоллбэк на случай, если модель проигнорировала флаги и записала текст в thinking
+            if not result_text and json_data.get("thinking"):
+                result_text = json_data.get("thinking", "").strip()
+                
+            return result_text
 
     async def analyze_image_batch(self, image_paths: list, prompt: str) -> str:
-        """ПАКЕТНЫЙ OCR: Анализ раскадровки видео."""
+        """ПАКЕТНЫЙ OCR: Анализ раскадровки видео с оптимизацией веса кадров."""
+        from src.cognitive.llm_service import llm
+        
         images_encoded = []
         for img_path in image_paths:
-            if os.path.exists(img_path):
-                with open(img_path, "rb") as image_file:
-                    images_encoded.append(base64.b64encode(image_file.read()).decode('utf-8'))
+            path_obj = Path(img_path)
+            if path_obj.exists():
+                try:
+                    encoded = self._prepare_image_base64(path_obj, max_side=self.max_side_batch, quality=85)
+                    images_encoded.append(encoded)
+                except Exception as e:
+                    print(f"[VisionService] Не удалось обработать кадр {img_path}: {e}")
                     
         if not images_encoded:
             return "Текст на экране не обнаружен (нет кадров для анализа)."
 
-        # ПРИМЕЧАНИЕ: Если используешь llava, пакетный режим может сбоить. 
-        # Если будет падать, лучше передавать по одному кадру в цикле.
         payload = {
             "model": self.model_name,
             "prompt": prompt,
             "images": images_encoded,
             "stream": False,
             "options": {
-                "temperature": 0.2
+                "num_ctx": 4096,
+                "num_predict": 2048,
+                "temperature": 0.0,
+                "num_gpu": 99,
+                "think": False,
+                "reasoning": False
             }
         }
         
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(self.ollama_url, json=payload)
-            if response.status_code == 200:
-                return response.json().get("response", "")
-            else:
-                raise RuntimeError(f"Ollama Batch error: {response.status_code}")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                response = await client.post(llm.base_url + "/api/generate", json=payload)
+                response.raise_for_status()
+                return response.json().get("response", "").strip()
+            except Exception as e:
+                print(f"[VisionService] ❌ Ошибка пакетного Vision API: {e}")
+                return ""
 
 # Экспортируем синглтон
 vision_service = VisionService()
