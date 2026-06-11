@@ -1,5 +1,7 @@
+import hashlib  # Добавлен для хэширования id виртуальных чанков OpenViking
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import json
 
 from src.storage.vector_store import VectorStore
 from src.cognitive.llm_service import llm
@@ -105,5 +107,49 @@ class SemanticMemory:
         """Сохранение ответа RAG в L1/L2 — делегирует в CacheManager."""
         from src.infrastructure.cache_manager import cache_manager
         await cache_manager.save_to_cache(query, response)
+
+    # --- НОВЫЙ МЕТОД ПОДДЕРЖКИ АРХИТЕКТУРЫ OpenViking ---
+
+    async def add_fact(self, chat_id: int, text: str, metadata: dict = None) -> None:
+        """
+        Сохраняет изолированный семантический факт (предпочтение, сущность, план),
+        сгенерированный конвейером сжатия памяти OpenViking, напрямую в LanceDB.
+        """
+        if not text or not text.strip():
+            return
+
+        cleaned_text = text.strip()
+        # Генерация детерминированного уникального id на основе текста и chat_id для исключения KeyError
+        fact_id = hashlib.md5(f"chat_{chat_id}_{cleaned_text}".encode("utf-8")).hexdigest()
+
+        # Наполнение метаданных согласно v3.5 спецификации ARCHITECTURE.md
+        meta = {
+            "directory_context": f"Динамическая память сессий чата {chat_id}",
+            "is_sensitive": False,
+            "tags": ["viking_memory", "extracted_fact"],
+            "chat_id": chat_id,
+            "header_chain": ["OpenViking Memory Commit"],
+            "header_path": "OpenViking Memory Commit",
+            "links": []
+        }
+        if metadata:
+            meta.update(metadata)
+
+        virtual_file_path = f"dynamic_memory://chat_{chat_id}"
+        
+        # Фиксируем структуру чанка под строгие требования VectorStore
+        chunk = {
+            "id": fact_id,  # Устраняет ошибку KeyError: 'id'
+            "text": cleaned_text,
+            "file_path": virtual_file_path,
+            "metadata": meta
+        }
+
+        try:
+            # Передаем массив чанков на векторизацию и сохранение
+            await self.store.embed_and_save_chunks([chunk], llm)
+            agent_logger.info("SemanticMemory", f"[Viking Fact] Успешно сохранен семантический факт для чата {chat_id}")
+        except Exception as e:
+            agent_logger.error("SemanticMemory", f"Ошибка при сохранении факта для чата {chat_id} в LanceDB: {e}")
 
 memory = SemanticMemory()
